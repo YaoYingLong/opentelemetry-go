@@ -19,8 +19,7 @@ type config struct {
 	// Writer is the destination.  If not set, os.Stdout is used.
 	Writer io.Writer
 
-	// PrettyPrint will encode the output into readable JSON. Default is
-	// false.
+	// PrettyPrint will encode the output into readable JSON. Default is false.
 	PrettyPrint bool
 
 	// Timestamps specifies if timestamps should be printed. Default is

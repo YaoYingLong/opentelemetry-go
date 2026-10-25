@@ -107,7 +107,9 @@ func NewInstrumentation(id int64) (*Instrumentation, error) {
 
 	i := &Instrumentation{
 		attrs: []attribute.KeyValue{
+			// key为otel.component.name，value为go.opentelemetry.io/otel/exporters/stdout/stdouttrace.Exporter/id
 			semconv.OTelComponentName(ComponentName(id)),
+			// key为otel.component.type，value为go.opentelemetry.io/otel/exporters/stdout/stdouttrace.Exporter
 			semconv.OTelComponentTypeKey.String(ComponentType),
 		},
 	}

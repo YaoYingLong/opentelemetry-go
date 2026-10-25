@@ -103,6 +103,7 @@ type experimentalOption interface {
 //
 // The passed opts are used to override these default values and configure the
 // returned TracerProvider appropriately.
+// 这里一般是入口
 func NewTracerProvider(opts ...TracerProviderOption) *TracerProvider {
 	o := tracerProviderConfig{
 		spanLimits: NewSpanLimits(),
@@ -540,6 +541,7 @@ func applyTracerProviderEnvConfigs(cfg tracerProviderConfig) tracerProviderConfi
 func tracerProviderOptionsFromEnv() []TracerProviderOption {
 	var opts []TracerProviderOption
 
+	// 获取采样类型Sampler
 	sampler, err := samplerFromEnv()
 	if err != nil {
 		otel.Handle(err)

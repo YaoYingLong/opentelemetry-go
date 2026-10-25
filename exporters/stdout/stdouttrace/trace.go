@@ -27,6 +27,7 @@ func New(options ...Option) (*Exporter, error) {
 	cfg := newConfig(options...)
 
 	enc := json.NewEncoder(cfg.Writer)
+	// 其实配置的是否打印到控制台
 	if cfg.PrettyPrint {
 		enc.SetIndent("", "\t")
 	}

@@ -20,10 +20,12 @@ type Feature[T any] struct {
 
 func newFeature[T any](suffix []string, parse func(string) (T, bool)) Feature[T] {
 	const envKeyRoot = "OTEL_GO_X_"
+	// 初始时suffix为{"OBSERVABILITY", "SELF_OBSERVABILITY"}
 	keys := make([]string, 0, len(suffix))
 	for _, s := range suffix {
 		keys = append(keys, envKeyRoot+s)
 	}
+	// 处理后keys的值为{"OTEL_GO_X_OBSERVABILITY", "OTEL_GO_X_SELF_OBSERVABILITY"}
 	return Feature[T]{
 		keys:  keys,
 		parse: parse,
@@ -42,6 +44,7 @@ func (f Feature[T]) Lookup() (v T, ok bool) {
 	//
 	// > The SDK MUST interpret an empty value of an environment variable the
 	// > same way as when the variable is unset.
+	// keys的值为{"OTEL_GO_X_OBSERVABILITY", "OTEL_GO_X_SELF_OBSERVABILITY"}
 	for _, key := range f.keys {
 		vRaw := os.Getenv(key)
 		if vRaw != "" {

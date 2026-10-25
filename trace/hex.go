@@ -18,6 +18,7 @@ const (
 	// The '\xff' character is used as invalid because no valid character has
 	// the upper 4 bits set. Meaning, an efficient validation can be performed
 	// over multiple character parsing by checking these bits remain zero.
+	// 是一张查找表，用来把小写十六进制字符转换成数值，并快速检查字符是否合法。
 	hexRev = "" +
 		"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
 		"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +

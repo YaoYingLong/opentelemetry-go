@@ -68,6 +68,7 @@ type batchSpanProcessor struct {
 	e SpanExporter
 	o BatchSpanProcessorOptions
 
+	// 是一个带缓冲长度的chan，默认缓冲长度为2048
 	queue   chan ReadOnlySpan
 	dropped atomic.Uint32
 
@@ -89,7 +90,9 @@ var _ SpanProcessor = (*batchSpanProcessor)(nil)
 //
 // If the exporter is nil, the span processor will perform no action.
 func NewBatchSpanProcessor(exporter SpanExporter, options ...BatchSpanProcessorOption) SpanProcessor {
+	// 内存队列大小默认也还是2048
 	maxQueueSize := env.BatchSpanProcessorMaxQueueSize(DefaultMaxQueueSize)
+	// 每个批次默认是512
 	maxExportBatchSize := env.BatchSpanProcessorMaxExportBatchSize(DefaultMaxExportBatchSize)
 
 	if maxExportBatchSize > maxQueueSize {
@@ -97,19 +100,23 @@ func NewBatchSpanProcessor(exporter SpanExporter, options ...BatchSpanProcessorO
 	}
 
 	o := BatchSpanProcessorOptions{
-		BatchTimeout:       time.Duration(env.BatchSpanProcessorScheduleDelay(DefaultScheduleDelay)) * time.Millisecond,
+		// 默认周期5s
+		BatchTimeout: time.Duration(env.BatchSpanProcessorScheduleDelay(DefaultScheduleDelay)) * time.Millisecond,
+		// 默认超时时间30s
 		ExportTimeout:      time.Duration(env.BatchSpanProcessorExportTimeout(DefaultExportTimeout)) * time.Millisecond,
 		MaxQueueSize:       maxQueueSize,
 		MaxExportBatchSize: maxExportBatchSize,
 	}
+	// 默认没有传入options
 	for _, opt := range options {
 		opt(&o)
 	}
 	bsp := &batchSpanProcessor{
-		e:      exporter,
-		o:      o,
-		batch:  make([]ReadOnlySpan, 0, o.MaxExportBatchSize),
-		timer:  time.NewTimer(o.BatchTimeout),
+		e:     exporter,
+		o:     o,
+		batch: make([]ReadOnlySpan, 0, o.MaxExportBatchSize),
+		timer: time.NewTimer(o.BatchTimeout),
+		// queue是一个带2048长度的缓冲chan
 		queue:  make(chan ReadOnlySpan, o.MaxQueueSize),
 		stopCh: make(chan struct{}),
 	}
@@ -298,8 +305,10 @@ func (bsp *batchSpanProcessor) exportSpans(ctx context.Context) error {
 	if l := len(bsp.batch); l > 0 {
 		global.Debug("exporting spans", "count", len(bsp.batch), "total_dropped", bsp.dropped.Load())
 		if bsp.inst != nil {
+			// 处理指标
 			bsp.inst.Processed(ctx, int64(l))
 		}
+		// 真正通过rpc的方式将数据发到收集器
 		err := bsp.e.ExportSpans(ctx, bsp.batch)
 
 		// A new batch is always created after exporting, even if the batch failed to be exported.
@@ -307,6 +316,7 @@ func (bsp *batchSpanProcessor) exportSpans(ctx context.Context) error {
 		// It is up to the exporter to implement any type of retry logic if a batch is failing
 		// to be exported, since it is specific to the protocol and backend being sent to.
 		clear(bsp.batch) // Erase elements to let GC collect objects
+		//把切片的长度重置为 0，逻辑上清空切片，但不会清除底层数组的数据
 		bsp.batch = bsp.batch[:0]
 
 		if err != nil {
@@ -324,11 +334,13 @@ func (bsp *batchSpanProcessor) processQueue() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// 死循环一直执行
 	for {
 		select {
 		case <-bsp.stopCh:
 			return
 		case <-bsp.timer.C:
+			// 每5s执行一次
 			if err := bsp.exportSpans(ctx); err != nil {
 				otel.Handle(err)
 			}
@@ -395,20 +407,25 @@ func (bsp *batchSpanProcessor) enqueue(sd ReadOnlySpan) {
 	if bsp.o.BlockOnQueueFull {
 		bsp.enqueueBlockOnQueueFull(ctx, sd)
 	} else {
+		// enqueueDrop与enqueueBlockOnQueueFull的区别是当队列满了记录dropped指标
 		bsp.enqueueDrop(ctx, sd)
 	}
 }
 
 func (bsp *batchSpanProcessor) enqueueBlockOnQueueFull(ctx context.Context, sd ReadOnlySpan) bool {
 	if !sd.SpanContext().IsSampled() {
+		// 跟java中实现一样，如果span没有被采样，直接返回
 		return false
 	}
 
 	select {
+	// 将传入的ReadOnlySpan写入到带缓冲的chan队列中，默认缓冲长度为2048
 	case bsp.queue <- sd:
 		return true
 	case <-ctx.Done():
+		// 如果写入chan被阻塞，说明队列满了，执行该逻辑
 		if bsp.inst != nil {
+			// 这里添加指标
 			bsp.inst.ProcessedQueueFull(ctx, 1)
 		}
 		return false
@@ -417,15 +434,19 @@ func (bsp *batchSpanProcessor) enqueueBlockOnQueueFull(ctx context.Context, sd R
 
 func (bsp *batchSpanProcessor) enqueueDrop(ctx context.Context, sd ReadOnlySpan) bool {
 	if !sd.SpanContext().IsSampled() {
+		// 跟java中实现一样，如果span没有被采样，直接返回
 		return false
 	}
 
 	select {
+	// 将传入的ReadOnlySpan写入到带缓冲的chan队列中，默认缓冲长度为2048
 	case bsp.queue <- sd:
 		return true
 	default:
+		// 添加dropped指标
 		bsp.dropped.Add(1)
 		if bsp.inst != nil {
+			// 添加指标
 			bsp.inst.ProcessedQueueFull(ctx, 1)
 		}
 	}

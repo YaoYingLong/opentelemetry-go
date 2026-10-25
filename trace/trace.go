@@ -38,12 +38,14 @@ type TraceID [16]byte
 
 var (
 	nilTraceID TraceID
-	_          json.Marshaler = nilTraceID
+	// 在编译时检查 TraceID 是否实现了 json.Marshaler 接口
+	_ json.Marshaler = nilTraceID
 )
 
 // IsValid reports whether the trace TraceID is valid. A valid trace ID does
 // not consist of zeros only.
 func (t TraceID) IsValid() bool {
+	// 数组所有值都是0，就是的无效的TraceID
 	return t != nilTraceID
 }
 
@@ -51,6 +53,7 @@ func (t TraceID) IsValid() bool {
 // as a hex string.
 func (t TraceID) MarshalJSON() ([]byte, error) {
 	b := [32 + 2]byte{0: '"', 33: '"'}
+	// 将16byte的原始SpanID编码成32比特
 	h := t.hexBytes()
 	copy(b[1:], h[:])
 	return b[:], nil
@@ -58,12 +61,14 @@ func (t TraceID) MarshalJSON() ([]byte, error) {
 
 // String returns the hex string representation form of a TraceID.
 func (t TraceID) String() string {
+	// 将16byte的原始SpanID编码成32比特
 	h := t.hexBytes()
 	return string(h[:])
 }
 
 // hexBytes returns the hex string representation form of a TraceID.
 func (t TraceID) hexBytes() [32]byte {
+	// hexLU的值为0123456789abcdef，这里其实是做一次编码，跟java里面的实现类似的
 	return [32]byte{
 		hexLU[t[0x0]>>4], hexLU[t[0x0]&0xf],
 		hexLU[t[0x1]>>4], hexLU[t[0x1]&0xf],
@@ -85,23 +90,28 @@ func (t TraceID) hexBytes() [32]byte {
 }
 
 // SpanID is a unique identity of a span in a trace.
+// 长度固定为 8 的字节数组，每个元素占 1 字节，取值范围是 0～255，所以该数组共占 8 字节（64 位）
 type SpanID [8]byte
 
 var (
 	nilSpanID SpanID
-	_         json.Marshaler = nilSpanID
+	// 在编译时检查 SpanID 是否实现了 json.Marshaler 接口
+	_ json.Marshaler = nilSpanID
 )
 
 // IsValid reports whether the SpanID is valid. A valid SpanID does not consist
 // of zeros only.
 func (s SpanID) IsValid() bool {
+	// 数组所有值都是0，就是的无效的SpanId
 	return s != nilSpanID
 }
 
 // MarshalJSON implements a custom marshal function to encode SpanID
 // as a hex string.
 func (s SpanID) MarshalJSON() ([]byte, error) {
+	// 创建一个长度18的数组，将第0和第17位赋值为"
 	b := [16 + 2]byte{0: '"', 17: '"'}
+	// 将8byte的原始SpanID编码成16比特
 	h := s.hexBytes()
 	copy(b[1:], h[:])
 	return b[:], nil
@@ -109,11 +119,13 @@ func (s SpanID) MarshalJSON() ([]byte, error) {
 
 // String returns the hex string representation form of a SpanID.
 func (s SpanID) String() string {
+	// 将8byte的原始SpanID编码成16比特
 	b := s.hexBytes()
 	return string(b[:])
 }
 
 func (s SpanID) hexBytes() [16]byte {
+	// hexLU的值为0123456789abcdef，这里其实是做一次编码，跟java里面的实现类似的
 	return [16]byte{
 		hexLU[s[0]>>4], hexLU[s[0]&0xf],
 		hexLU[s[1]>>4], hexLU[s[1]&0xf],
@@ -130,8 +142,10 @@ func (s SpanID) hexBytes() [16]byte {
 // the W3C trace-context specification.  See more at
 // https://www.w3.org/TR/trace-context/#trace-id
 // nolint:revive // revive complains about stutter of `trace.TraceIDFromHex`.
+// 跟java类似将字符串类型的TraceId解码成原始的byte数组
 func TraceIDFromHex(h string) (TraceID, error) {
 	if len(h) != 32 {
+		// 如果长度不到32说明是一个无效的traceId，直接返回一个无效的TraceID和错误信息
 		return [16]byte{}, errInvalidTraceIDLength
 	}
 	// Decoding every character at a constant index allows the compiler to
@@ -261,6 +275,7 @@ func (tf TraceFlags) WithRandom(random bool) TraceFlags { // nolint:revive  // r
 		return tf | FlagsRandom
 	}
 
+	// 作用相等于：tf & (^FlagsSampled)
 	return tf &^ FlagsRandom
 }
 

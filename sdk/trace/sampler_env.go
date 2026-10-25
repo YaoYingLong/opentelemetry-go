@@ -46,11 +46,12 @@ func (e samplerArgParseError) Unwrap() error {
 }
 
 func samplerFromEnv() (Sampler, error) {
+	// 获取OTEL_TRACES_SAMPLER环境变量配置的内容，即采样类型
 	sampler := strings.ToLower(strings.TrimSpace(os.Getenv(tracesSamplerKey)))
 	if sampler == "" {
 		return nil, nil
 	}
-
+	// 获取OTEL_TRACES_SAMPLER_ARG环境变量配置的内容，采样比例
 	samplerArg := strings.TrimSpace(os.Getenv(tracesSamplerArgKey))
 	hasSamplerArg := samplerArg != ""
 

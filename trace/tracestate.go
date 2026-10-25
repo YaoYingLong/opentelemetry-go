@@ -64,6 +64,7 @@ func checkKeyRemain(key string) bool {
 		if v > 127 {
 			return false
 		}
+		// v是a-z小写字母或0-9的数组则返回true
 		if isAlphaNumASCII(v) {
 			continue
 		}
@@ -87,8 +88,11 @@ func checkKeyPart(key string, n int) bool {
 		return false
 	}
 	first := key[0] // key's first char
+	// 这里其实是判断len(key[1:])的长度小于等于n则ret为true，否则为false
 	ret := len(key[1:]) <= n
+	// 剩余长度必须小于n，且第一个字符必须是小写字母
 	ret = ret && first >= 'a' && first <= 'z'
+	// 判断每一个字符必须是a-z小写字母或0-9的数字或则_-*/等4个特殊字符的一个返回true
 	return ret && checkKeyRemain(key[1:])
 }
 
@@ -140,10 +144,12 @@ func newMember(key, value string) (member, error) {
 }
 
 func parseMember(m string) (member, error) {
+	// 按=分隔符第一次出现的位置，把字符串m分成两部分
 	key, val, ok := strings.Cut(m, memberDelimiter)
 	if !ok {
 		return member{}, fmt.Errorf("%w: %s", errInvalidMember, m)
 	}
+	// 去除空白符
 	key = strings.TrimLeft(key, " \t")
 	val = strings.TrimRight(val, " \t")
 	result, e := newMember(key, val)
@@ -193,6 +199,7 @@ func ParseTraceState(ts string) (TraceState, error) {
 	found := make(map[string]struct{})
 	for ts != "" {
 		var memberStr string
+		// 拆分开第一个逗号分割的内容
 		memberStr, ts, _ = strings.Cut(ts, listDelimiters)
 		if memberStr == "" {
 			continue
@@ -204,12 +211,14 @@ func ParseTraceState(ts string) (TraceState, error) {
 		}
 
 		if _, ok := found[m.Key]; ok {
+			// 说明存在重复的key
 			return TraceState{}, wrapErr(errDuplicate)
 		}
 		found[m.Key] = struct{}{}
 
 		members = append(members, m)
 		if n := len(members); n > maxListMembers {
+			// 如果超过32个内容
 			return TraceState{}, wrapErr(errMemberNumber)
 		}
 	}

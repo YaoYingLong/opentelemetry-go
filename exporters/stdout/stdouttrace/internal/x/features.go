@@ -15,6 +15,7 @@ import "strings"
 var Observability = newFeature(
 	[]string{"OBSERVABILITY", "SELF_OBSERVABILITY"},
 	func(v string) (string, bool) {
+		// 忽略大小写判断v的值是否等于true
 		if strings.EqualFold(v, "true") {
 			return v, true
 		}

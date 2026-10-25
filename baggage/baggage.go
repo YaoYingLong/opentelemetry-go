@@ -184,6 +184,7 @@ func fromInternalProperties(iProps []baggage.Property) properties {
 		return nil
 	}
 
+	// 做类型转换
 	props := make(properties, len(iProps))
 	for i, p := range iProps {
 		props[i] = Property{
@@ -197,9 +198,11 @@ func fromInternalProperties(iProps []baggage.Property) properties {
 
 func (p properties) asInternal() []baggage.Property {
 	if len(p) == 0 {
+		// 如果properties数组长度为0直接返回nil
 		return nil
 	}
 
+	// 这里的作用是做类型转换
 	iProps := make([]baggage.Property, len(p))
 	for i, prop := range p {
 		iProps[i] = baggage.Property{
@@ -217,6 +220,7 @@ func (p properties) Copy() properties {
 	}
 
 	props := make(properties, len(p))
+	// 浅拷贝，copy不会递归复制元素内部引用的数据，这里其实也没有引用类型，相当于深拷贝
 	copy(props, p)
 	return props
 }
@@ -993,7 +997,7 @@ func validateBaggageName(s string) bool {
 	if s == "" {
 		return false
 	}
-
+	//检查字符串 s 是否是合法的 UTF-8 编码
 	return utf8.ValidString(s)
 }
 
