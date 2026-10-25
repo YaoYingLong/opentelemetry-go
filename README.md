@@ -72,6 +72,8 @@ are made for those systems currently.
 
 You can find a getting started guide on [opentelemetry.io](https://opentelemetry.io/docs/languages/go/getting-started/).
 
+中文学习资料：[核心源码阅读指南（面向熟悉 OpenTelemetry Java 的 Go 初学者）](docs/code-reading-zh-CN.md)。
+
 OpenTelemetry's goal is to provide a single set of APIs to capture distributed
 traces and metrics from your application and send them to an observability
 platform. This project allows you to do just that for applications written in

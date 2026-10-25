@@ -31,6 +31,9 @@ import (
 // [attribute.Distinct] returned from [Resource.Equivalent] should be used for
 // map and database keys instead.
 type Resource struct {
+	// 中文导读：Resource 回答“数据来自哪个服务/进程/主机”；instrumentation.Scope
+	// 回答“由哪个埋点库产生”；span/log/metric 上的属性描述某次操作或某组观测。
+	// Resource 在配置阶段构造后共享复用，不应为每次请求重新探测主机或进程信息。
 	attrs     attribute.Set
 	schemaURL string
 }
@@ -60,6 +63,9 @@ var ErrSchemaURLConflict = errors.New("conflicting Schema URL")
 // the caller to determine if this returned Resource should be used or not
 // based on these errors.
 func New(ctx context.Context, opts ...Option) (*Resource, error) {
+	// Detector 适合扩展云环境、容器等资源信息。配置决定探测顺序，detect 按顺序合并，
+	// 后面的属性可覆盖前面的同名属性。Go 允许同时返回“部分可用的 Resource”和 error，
+	// 调用者需要用 errors.Is 区分部分探测失败、schema 冲突等情况，而非认为有 err 就无结果。
 	cfg := config{}
 	for _, opt := range opts {
 		cfg = opt.apply(cfg)
@@ -197,6 +203,9 @@ func (r *Resource) Equal(o *Resource) bool {
 //
 // [OpenTelemetry specification rules]: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.20.0/specification/resource/sdk.md#merge
 func Merge(a, b *Resource) (*Resource, error) {
+	// 合并不修改已有 Resource；nil 按空资源处理。若一边为空，可以直接复用另一边指针，
+	// 这依赖 Resource 的不可变契约。b 的同名属性优先，但 schema 不同不能简单“后者覆盖”。
+	// schema URL 标识属性采用的语义约定版本，不能把两个版本静默宣布成同一个版本。
 	if a == nil && b == nil {
 		return Empty(), nil
 	}
@@ -251,6 +260,9 @@ func Default() *Resource {
 // If the default resource has already been initialized, the provided ctx
 // is ignored and the cached resource is returned.
 func DefaultWithContext(ctx context.Context) *Resource {
+	// sync.Once 不仅防止重复工作，也让并发调用安全地共享初始化结果。
+	// 默认资源只探测一次：之后改变环境变量或传入另一个 context，并不会触发重新探测。
+	// 需要独立配置或可重复测试时，应显式构造 Resource，而不是依赖全局缓存重置。
 	defaultResourceOnce.Do(func() {
 		var err error
 		defaultDetectors := []Detector{

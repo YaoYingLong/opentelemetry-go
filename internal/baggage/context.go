@@ -7,15 +7,15 @@ import "context"
 
 type baggageContextKeyType int
 
-// 声明常量baggageKey，baggageContextKeyType是常量类型
+// 声明常量baggageKey，baggageContextKeyType是常量类型.
 const baggageKey baggageContextKeyType = iota
 
 // SetHookFunc is a callback called when storing baggage in the context.
-// 将baggage存储到Context时的回调
+// 将baggage存储到Context时的回调.
 type SetHookFunc func(context.Context, List) context.Context
 
 // GetHookFunc is a callback called when getting baggage from the context.
-// 从Context获取baggage时的回调
+// 从Context获取baggage时的回调.
 type GetHookFunc func(context.Context, List) List
 
 type baggageState struct {

@@ -68,6 +68,12 @@ func newPipeline(
 // As instruments are created the instrument should be checked if it exists in
 // the views of a the Reader, and if so each aggregate function should be added
 // to the pipeline.
+//
+// 中文导读：一个 pipeline 对应一个 Reader，保存该 Reader 的回调和聚合输出入口。
+// instrument 持有写入侧 Measure，aggregations 保存读取侧 ComputeAggregation，
+// 两侧函数引用同一聚合器状态。这里没有按测量次数增长的原始事件队列。
+// pipeline 的锁保护注册表和完整采集流程；同步测量使用聚合器自己的并发机制，
+// 不会为了每次 Add/Record 都获取这把管线锁。
 type pipeline struct {
 	resource *resource.Resource
 
@@ -132,6 +138,11 @@ func (p *pipeline) addMultiCallback(c multiCallback) (unregister func()) {
 //
 // This method is safe to call concurrently.
 func (p *pipeline) produce(ctx context.Context, rm *metricdata.ResourceMetrics) error {
+	// 中文导读：一次采集先运行所有异步回调，再把所有聚合器转成 metricdata。
+	// 回调和聚合必须走完同一轮：部分回调执行后提前退出，可能把本轮值留到下一轮重算。
+	// 因此这里只在入口拒绝已取消的 ctx，中途的取消交给回调协作处理，回调错误则合并返回。
+	// 即使回调报错，聚合器的周期状态仍会推进；Reader 可能因此不导出本轮结果。
+	// 锁也使同一 Reader 的并发采集串行化，但不同 Reader 的回调仍可能同时执行。
 	// Only check if context is already cancelled before starting, not inside or after callback loops.
 	// If this method returns after executing some callbacks but before running all aggregations,
 	// internal aggregation state can be corrupted and result in incorrect data returned
@@ -159,6 +170,9 @@ func (p *pipeline) produce(ctx context.Context, rm *metricdata.ResourceMetrics) 
 	}
 
 	rm.Resource = p.resource
+	// 按 Resource -> Scope -> Metrics 组装输出，并复用调用方提供的切片容量。
+	// compAgg 的结果可能在下轮被覆盖，消费者需要明确数据所有权；不要把复用当作历史存储。
+	// 没有数据点的 instrument 和没有指标的 Scope 都会从本次结果中省略。
 	rm.ScopeMetrics = internal.ReuseSlice(rm.ScopeMetrics, len(p.aggregations))
 
 	i := 0
@@ -263,6 +277,10 @@ func (i *inserter[N]) forEachStream(
 	newAggregation streamAggregationFactory[N],
 	yield func(aggVal[N]),
 ) error {
+	// 中文导读：所有匹配的 View 都有机会生成流，不是“第一个匹配就停止”。
+	// 解析成同一缓存聚合器的多个匹配通过 agg.ID 去重，防止一次测量被同一状态重复累加。
+	// 只有完全没有显式 View 匹配时才补默认流；匹配到 Drop 也算匹配，不能再偷偷补回来。
+	// View 的匹配发生在 instrument 解析阶段，数值记录时直接调用解析好的函数。
 	var (
 		matched bool
 		err     error
@@ -402,6 +420,10 @@ func (i *inserter[N]) cachedAggregator(
 	readerAggregation Aggregation,
 	newAggregation streamAggregationFactory[N],
 ) aggVal[N] {
+	// 中文导读：这里把 View、Reader 和 instrument 的配置合并成一个可执行的流。
+	// View 未指定聚合时沿用 readerAggregation；显式 AggregationDefault 则选 SDK 默认聚合。
+	// 属性过滤器先于聚合键和基数限制生效；删除某个维度后，原来不同的属性组合可能合并。
+	// View 的 AttributeFilter 优先于 instrument 的 allowedKeys，nil 与空键集不能混为一谈。
 	switch stream.Aggregation.(type) {
 	case nil:
 		// The aggregation was not overridden with a view. Use the aggregation
@@ -440,6 +462,9 @@ func (i *inserter[N]) cachedAggregator(
 	// cache lookup to ensure the correct comparison.
 	normID := id.normalize()
 	cv := i.aggregators.Lookup(normID, func() aggVal[N] {
+		// 此缓存属于当前 Meter、当前数值类型和当前 Reader 的 inserter。
+		// 缓存命中会复用已建好的流；未命中才创建聚合器并向 pipeline 注册一次输出函数。
+		// temporality 由当前 Reader 选择，所以另一个 Reader 的采集不会清空这里的 Delta 状态。
 		b := aggregate.Builder[N]{
 			Temporality: i.pipeline.reader.temporality(kind),
 			ReservoirFunc: reservoirFunc[N](
@@ -492,6 +517,9 @@ func (i *inserter[N]) cachedAggregator(
 // limit is used, then the default if global is unset. When fallback is false,
 // the selector's limit is used (0 or less means unlimited).
 func (i *inserter[N]) getCardinalityLimit(kind InstrumentKind) int {
+	// 限制针对每个聚合器内的不同属性集合数量，不是 Meter 总数或每秒测量次数。
+	// Reader 可以按 instrument kind 覆盖 Provider 的限制；超限测量的去向由聚合器处理。
+	// 对 Sum 而言，超限的新属性集合会汇入 overflow 序列，值仍累加，但属性细节不再保留。
 	limit, fallback := i.pipeline.reader.cardinalityLimit(kind)
 	if fallback {
 		return i.pipeline.cardinalityLimit
@@ -692,6 +720,9 @@ func newPipelines(
 	exemplarFilter exemplar.Filter,
 	cardinalityLimit int,
 ) pipelines {
+	// 给每个 Reader 建立独立的生产端，再把 produce 方法值注册给 Reader。
+	// Go 的方法值会绑定接收者 p；Reader 之后调用它，就能回到对应管线采集。
+	// Reader 的注册只能成功一次，不能把同一个 Reader 实例当作多个 Provider 的共享出口。
 	pipes := make([]*pipeline, 0, len(readers))
 	for _, r := range readers {
 		p := newPipeline(res, r, views, exemplarFilter, cardinalityLimit)
@@ -731,6 +762,9 @@ func newResolver[N int64 | float64](p pipelines, vc *cache[string, instID]) reso
 // Aggregators returns the Aggregators that must be updated by the instrument
 // defined by key.
 func (r resolver[N]) Aggregators(id Instrument, allowedKeys []attribute.Key) ([]aggregate.Measure[N], error) {
+	// 一个 instrument 的一次记录会扇出到各 Reader、各匹配流的 Measure。
+	// 返回的切片是函数值列表，既连接写入目标，也把 View 解析从频繁执行的记录路径中移走。
+	// 没有 Reader 时切片为空，后续记录自然不会更新任何 SDK 聚合状态。
 	var measures []aggregate.Measure[N]
 
 	var err error

@@ -24,6 +24,11 @@ var ErrInstrumentName = errors.New("invalid instrument name")
 // meter represents a single instrumentation scope; all metric telemetry
 // produced by an instrumentation scope will use metric instruments from a
 // single meter.
+//
+// 中文导读：Meter 负责把 API instrument 绑定到具体的聚合函数，不负责定时导出。
+// int64 和 float64 分开缓存，resolver[N] 用类型参数复用相同的绑定流程；
+// N 在这里是编译期确定的数值类型，记录时不需要把每个数值装入 any 再分派。
+// 同步 instrument 保存所有目标流的 Measure 函数，异步 instrument 则在采集回调中观察值。
 type meter struct {
 	embedded.Meter
 
@@ -68,6 +73,9 @@ var _ metric.Meter = (*meter)(nil)
 // options. The instrument is used to synchronously record increasing int64
 // measurements during a computational operation.
 func (m *meter) Int64Counter(name string, options ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	// 用这个入口追踪同步记录：lookup -> resolver.Aggregators -> inserter -> Builder.Sum。
+	// lookup 在创建阶段准备好 Measure 列表，之后 int64Inst.Add 可直接遍历该列表。
+	// 返回的 instrument 与 error 是两个独立结果；名称校验失败不意味着 instrument 必为 nil。
 	cfg := metric.NewInt64CounterConfig(options...)
 	const kind = InstrumentKindCounter
 	p := int64InstProvider{m}
@@ -133,6 +141,11 @@ func (m *meter) int64ObservableInstrument(
 	allowedKeys []attribute.Key,
 	callbacks []metric.Int64Callback,
 ) (int64Observable, error) {
+	// 中文导读：“异步”指 SDK 采集时调用应用提供的函数，不是每个 instrument 自带 goroutine。
+	// 每个 Reader 的回调只写本 pipeline 的聚合器；否则 Reader A 的采集会污染 Reader B。
+	// 同一个应用回调可能因多个 Reader 而被多次调用，应读取当前状态而不是消费一次性事件。
+	// 下方闭包捕获 fn 和 observer，把用户函数与本 pipeline 的 Measure 列表绑定起来。
+	// float64ObservableInstrument 采用同样的绑定方式，区别只是数值类型。
 	key := instID{
 		Name:        id.Name,
 		Description: id.Description,
@@ -484,6 +497,11 @@ func warnRepeatedObservableCallbacks(id Instrument) {
 // The returned Registration can be used to unregister f.
 // If f is nil, no callback is registered.
 func (m *meter) RegisterCallback(f metric.Callback, insts ...metric.Observable) (metric.Registration, error) {
+	// 中文导读：RegisterCallback 把一个用户回调关联到一组允许观察的 instrument。
+	// observer 的 map 是这次注册的白名单，避免回调向未声明或其他 Meter 的 instrument 写入。
+	// 每个 pipeline 得到各自的 observer 和注销函数，返回的 Registration 汇总这些注销动作。
+	// 回调由 pipeline.produce 在锁内同步执行；不要在回调里注销自身或再触发同一管线的采集，
+	// 这些操作也需要同一把锁。需要阻塞等待的外部读取应主动检查传入的采集 ctx。
 	if f == nil || len(insts) == 0 {
 		// Don't allocate an observer if there is no callback or instrument.
 		return noopRegister{}, nil
@@ -605,6 +623,9 @@ func (r observer) ObserveFloat64(o metric.Float64Observable, v float64, opts ...
 }
 
 func (r observer) ObserveInt64(o metric.Int64Observable, v int64, opts ...metric.ObserveOption) {
+	// Observe 的 API 没有 context 参数；这里传给 Measure 的是 Background。
+	// 用户回调收到的 ctx 用来控制采集工作，不会自动成为每个观测值的 trace 上下文。
+	// observer 依赖 produce 持有的锁读取管线映射，因此不应保留到回调结束后继续使用。
 	var oImpl int64Observable
 	switch conv := o.(type) {
 	case int64Observable:
@@ -814,6 +835,9 @@ func (o float64Observer) Observe(val float64, opts ...metric.ObserveOption) {
 }
 
 func defaultAttributes[T any](opts []T) []attribute.Key {
+	// nil 与非 nil 的空切片在这里有意保留不同含义：前者表示没有声明默认属性限制，
+	// 后者表示显式声明不保留任何属性键。pipeline 只在 View 未设置过滤器时采用此建议。
+	// any(o) 后的接口断言按能力识别实验选项，让稳定 SDK 不必依赖实验模块的具体类型。
 	var keys []attribute.Key
 	var found bool
 	for _, o := range opts {

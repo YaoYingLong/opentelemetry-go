@@ -124,6 +124,9 @@ func WithMaxExportBatchSize(size int) PeriodicReaderOption {
 // metric data to the user. It will not automatically send that data to the
 // exporter. That is left to the user to accomplish.
 func NewPeriodicReader(exporter Exporter, options ...PeriodicReaderOption) *PeriodicReader {
+	// 中文导读：PeriodicReader 为指标添加后台采集和导出调度，聚合仍由 pipeline 完成。
+	// Exporter 同时提供聚合与 temporality 偏好，并负责把 metricdata 发往具体目的地。
+	// 这里启动的是 Reader 级 goroutine；它不是把每次 Add 放入队列再逐条发送。
 	conf := newPeriodicReaderConfig(options)
 	ctx, cancel := context.WithCancel( //nolint:gosec  // cancel called during PeriodicReader shutdown.
 		context.Background(),
@@ -202,6 +205,9 @@ var _ = map[Reader]struct{}{&PeriodicReader{}: {}}
 // run continuously collects and exports metric data at the specified
 // interval. This will run until ctx is canceled or times out.
 func (r *PeriodicReader) run(ctx context.Context, interval time.Duration) {
+	// 定时触发和 ForceFlush 请求都在同一循环执行 collectAndExport，避免这两条路径并行导出。
+	// flushCh 传递的是“结果通道”，收到请求后把采集导出的结果送回调用方。
+	// ticker 不会为每个错过的时刻创建新 goroutine；慢导出会拖延这个循环处理后续请求。
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -250,11 +256,17 @@ func (r *PeriodicReader) cardinalityLimit(kind InstrumentKind) (int, bool) {
 // collectAndExport gather all metric data related to the periodicReader r from
 // the SDK and exports it with r's exporter.
 func (r *PeriodicReader) collectAndExport(ctx context.Context) error {
+	// 中文导读：Collect 只生成数据，Export 才发送数据；采集报错时本次不会进入 Export。
+	// 对 Delta 聚合而言，Collect 已经切换周期，之后导出失败不会在此自动回滚或重放。
+	// 未分批时采集与导出共用一个超时上下文；分批时每批从 originalCtx 派生独立超时。
+	// 因此多批导出的总耗时可能超过一个 timeout，仍受 originalCtx 自身的截止时间约束。
 	originalCtx := ctx
 	ctx, cancel := context.WithTimeoutCause(ctx, r.timeout, errors.New("reader collect and export timeout"))
 	defer cancel()
 	// TODO (#3047): Use a sync.Pool or persistent pointer instead of allocating rm every Collect.
 	rm := r.rmPool.Get().(*metricdata.ResourceMetrics)
+	// Export 返回后容器会清空并放回池，Exporter 不能把此指针当作永久拥有的数据。
+	// sync.Pool 仅是临时对象复用机制，不是可靠的缓存，也不能用它保证对象一定保留。
 	defer func() {
 		*rm = metricdata.ResourceMetrics{} // erase fields to allow GC to collect them.
 		r.rmPool.Put(rm)
@@ -345,6 +357,10 @@ func (r *PeriodicReader) exportWithTimeout(ctx context.Context, m *metricdata.Re
 //
 // This method is safe to call concurrently.
 func (r *PeriodicReader) ForceFlush(ctx context.Context) error {
+	// 中文导读：ForceFlush 请求后台循环立即采集导出，成功后再调用 Exporter.ForceFlush。
+	// errCh 容量为 1：即使调用方因 ctx 取消而先返回，后台循环仍能写入结果，不会被遗弃的接收者卡住。
+	// 传入的 ctx 控制这里的等待和最后的 exporter flush；后台采集使用 run 的 ctx 加 Reader 超时，
+	// 请求方取消等待并不等于强制终止已经开始的那次 collectAndExport。
 	// Prioritize the ctx timeout if it is set.
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -376,6 +392,11 @@ func (r *PeriodicReader) ForceFlush(ctx context.Context) error {
 //
 // This method is safe to call concurrently.
 func (r *PeriodicReader) Shutdown(ctx context.Context) error {
+	// 中文导读：先取消并等待后台循环退出，再替换生产端、最后采集一次并关闭 Exporter。
+	// Swap 返回旧的生产端，因此能让后续 Collect 得到关闭错误，同时保留最后采集的入口。
+	// sync.Once 使这套收尾动作只运行一次，不是每次 Shutdown 都再发送一批指标。
+	// ctx 取消依赖回调和 Exporter 主动响应；Go 无法强制中断忽略 ctx 的用户函数。
+	// 尤其这里等待 done 没有独立的超时分支，后台工作不返回时关闭也会继续等待。
 	err := ErrReaderShutdown
 	r.shutdownOnce.Do(func() {
 		// Prioritize the ctx timeout if it is set.

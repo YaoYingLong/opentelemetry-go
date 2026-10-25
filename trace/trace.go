@@ -38,7 +38,7 @@ type TraceID [16]byte
 
 var (
 	nilTraceID TraceID
-	// 在编译时检查 TraceID 是否实现了 json.Marshaler 接口
+	// 在编译时检查 TraceID 是否实现了 json.Marshaler 接口.
 	_ json.Marshaler = nilTraceID
 )
 
@@ -90,12 +90,12 @@ func (t TraceID) hexBytes() [32]byte {
 }
 
 // SpanID is a unique identity of a span in a trace.
-// 长度固定为 8 的字节数组，每个元素占 1 字节，取值范围是 0～255，所以该数组共占 8 字节（64 位）
+// 长度固定为 8 的字节数组，每个元素占 1 字节，取值范围是 0～255，所以该数组共占 8 字节（64 位）.
 type SpanID [8]byte
 
 var (
 	nilSpanID SpanID
-	// 在编译时检查 SpanID 是否实现了 json.Marshaler 接口
+	// 在编译时检查 SpanID 是否实现了 json.Marshaler 接口.
 	_ json.Marshaler = nilSpanID
 )
 
@@ -142,7 +142,7 @@ func (s SpanID) hexBytes() [16]byte {
 // the W3C trace-context specification.  See more at
 // https://www.w3.org/TR/trace-context/#trace-id
 // nolint:revive // revive complains about stutter of `trace.TraceIDFromHex`.
-// 跟java类似将字符串类型的TraceId解码成原始的byte数组
+// 跟java类似将字符串类型的TraceId解码成原始的byte数组.
 func TraceIDFromHex(h string) (TraceID, error) {
 	if len(h) != 32 {
 		// 如果长度不到32说明是一个无效的traceId，直接返回一个无效的TraceID和错误信息

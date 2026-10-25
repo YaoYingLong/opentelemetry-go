@@ -64,6 +64,9 @@ func (*simpleSpanProcessor) OnStart(context.Context, ReadWriteSpan) {}
 
 // OnEnd immediately exports a ReadOnlySpan.
 func (ssp *simpleSpanProcessor) OnEnd(s ReadOnlySpan) {
+	// 中文导读：简单处理器在调用 Span.End 的 goroutine 中导出，调用耗时直接进入业务路径。
+	// exporterMu 覆盖整个 ExportSpans 调用，使多个并发结束的 Span 依次访问同一 Exporter。
+	// 使用 Background 意味着这里没有请求取消或处理器自带的导出期限，Exporter 要自行控制 I/O。
 	ssp.exporterMu.Lock()
 	defer ssp.exporterMu.Unlock()
 
@@ -76,6 +79,8 @@ func (ssp *simpleSpanProcessor) OnEnd(s ReadOnlySpan) {
 		ssp.inst.SpanProcessed(ctx)
 	}
 
+	// End 已把 IsRecording 设为 false；导出资格检查的是保留在 SpanContext 中的 Sampled 位。
+	// OnEnd 没有 error 返回值，导出错误交给全局错误处理器，不作为业务错误向上传递。
 	if ssp.exporter != nil && s.SpanContext().TraceFlags().IsSampled() {
 		if err := ssp.exporter.ExportSpans(context.Background(), []ReadOnlySpan{s}); err != nil {
 			otel.Handle(err)
@@ -85,9 +90,14 @@ func (ssp *simpleSpanProcessor) OnEnd(s ReadOnlySpan) {
 
 // Shutdown shuts down the exporter this SimpleSpanProcessor exports to.
 func (ssp *simpleSpanProcessor) Shutdown(ctx context.Context) error {
+	// 中文导读：先在锁内取出 Exporter 并把字段置 nil，再在锁外执行它的 Shutdown。
+	// 这样关闭过程中若产生新的 Span，OnEnd 也只会看到已经停用的 Exporter。
+	// Once 只执行一次关闭；首次调用因取消提前返回，后续调用也不会重新发起关闭。
 	var err error
 	ssp.stopOnce.Do(func() {
 		stopFunc := func(exp SpanExporter) (<-chan error, func()) {
+			// 闭包保存 exp；只读 channel 类型约束接收方只能读取结果。
+			// 缓冲容量为 1，调用方超时离开后，关闭 goroutine 仍能发送一次结果并结束。
 			done := make(chan error, 1)
 			return done, func() { done <- exp.Shutdown(ctx) }
 		}

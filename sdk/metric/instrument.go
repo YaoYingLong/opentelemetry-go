@@ -190,6 +190,8 @@ type rawAttributesOption interface {
 }
 
 func extractRawKVs[T any](opts []T) []attribute.KeyValue {
+	// Go 的切片赋值只复制描述符，仍可能共用底层数组；第二次追加原始属性前必须先复制。
+	// 否则第一个选项的切片若还有多余容量，append 可能悄悄覆盖调用方仍持有的数据。
 	var rawKVs []attribute.KeyValue
 	var count int
 	for _, opt := range opts {
@@ -210,6 +212,8 @@ func extractRawKVs[T any](opts []T) []attribute.KeyValue {
 }
 
 func resolveAttributes(configAttrs attribute.Set, rawKVs []attribute.KeyValue) attribute.Set {
+	// 这里先把测量选项统一成 attribute.Set；同名键以追加在后的 rawKVs 为准。
+	// View 过滤仍在各个 Measure 内执行，不能在这里按某个 Reader 的规则提前丢掉维度。
 	configAttrs, _ = attrnorm.SetDedup(configAttrs)
 	if len(rawKVs) == 0 {
 		return configAttrs
@@ -224,6 +228,9 @@ func resolveAttributes(configAttrs attribute.Set, rawKVs []attribute.KeyValue) a
 	return attribute.NewSet(merged...)
 }
 
+// 中文导读：这个实现同时满足多种 int64 同步 instrument 接口，实际语义由创建时绑定的聚合器决定。
+// Counter 与 Histogram 不需要在每次调用时再按 kind 分支：它们保存的 Measure 已经不同。
+// measures 在构造完成后供记录路径读取；聚合状态由函数引用的聚合器持有，不存放在此结构体中。
 type int64Inst struct {
 	measures []aggregate.Measure[int64]
 
@@ -241,6 +248,9 @@ var (
 )
 
 func (i *int64Inst) Add(ctx context.Context, val int64, opts ...metric.AddOption) {
+	// 中文导读：这是应用调用 Counter.Add 后进入 SDK 的实际记录入口。
+	// 当前 ctx 被继续传给聚合器，供 exemplar 获取关联信息；记录路径不会因 ctx 已取消而丢弃数值。
+	// 记录上下文与 Reader 的采集/导出上下文职责不同，取消业务请求不是关闭遥测管线的方式。
 	c := metric.NewAddConfig(opts)
 	rawKVs := extractRawKVs(opts)
 	i.aggregate(ctx, val, resolveAttributes(c.Attributes(), rawKVs))
@@ -261,6 +271,9 @@ func (i *int64Inst) aggregate(
 	val int64,
 	s attribute.Set,
 ) { // nolint:revive  // okay to shadow pkg with method.
+	// 每个函数对应已解析的 Reader/流聚合入口；同一次测量依次更新这些独立状态。
+	// 这一步在调用 Add/Record 的 goroutine 内完成，没有启动任务，也没有调用 Exporter。
+	// 空列表可能来自未配置 Reader 或 Drop 聚合；遍历为空自然不产生任何聚合更新。
 	for _, in := range i.measures {
 		in(ctx, val, s)
 	}
@@ -289,6 +302,8 @@ func (i *float64Inst) Add(ctx context.Context, val float64, opts ...metric.AddOp
 }
 
 func (i *float64Inst) Record(ctx context.Context, val float64, opts ...metric.RecordOption) {
+	// float64 的记录桥接与 int64 相同；Histogram 的分桶、Gauge 的末值保留发生在各自的 Measure 内。
+	// Record 仅负责传递本次数值和属性，不能在这里把所有 instrument 都当作加法计数器处理。
 	c := metric.NewRecordConfig(opts)
 	rawKVs := extractRawKVs(opts)
 	i.aggregate(ctx, val, resolveAttributes(c.Attributes(), rawKVs))
@@ -390,6 +405,8 @@ type measures[N int64 | float64] []aggregate.Measure[N]
 
 // observe records the val for the set of attrs.
 func (m measures[N]) observe(val N, s attribute.Set) {
+	// 单 instrument 回调使用的 observer 持有当前 pipeline 的这份函数列表。
+	// Observe 没有显式 ctx 参数，因此这里使用 Background；采集取消由外围回调处理。
 	for _, in := range m {
 		in(context.Background(), val, s)
 	}

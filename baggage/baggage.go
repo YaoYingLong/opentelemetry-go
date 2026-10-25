@@ -997,7 +997,7 @@ func validateBaggageName(s string) bool {
 	if s == "" {
 		return false
 	}
-	//检查字符串 s 是否是合法的 UTF-8 编码
+	// 检查字符串 s 是否是合法的 UTF-8 编码
 	return utf8.ValidString(s)
 }
 

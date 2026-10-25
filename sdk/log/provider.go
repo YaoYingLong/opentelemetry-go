@@ -78,6 +78,11 @@ func newProviderConfig(opts []LoggerProviderOption) providerConfig {
 // After [LoggerProvider.Shutdown] starts, calls to [log.Logger.Enabled] on
 // Loggers created by the LoggerProvider return false, and calls to
 // [log.Logger.Emit] perform no operation.
+//
+// 中文导读：Provider 是日志管线的配置与生命周期边界；应用初始化时配置
+// Resource 和处理器，日志桥接库通过 API 获取 Logger。Resource 描述数据来源，
+// instrumentation.Scope 描述产生数据的埋点库，两者在导出时承担不同角色。
+// processors 创建后不再追加，因此 Emit 可以直接读取这份有序配置。
 type LoggerProvider struct {
 	embedded.LoggerProvider
 
@@ -91,6 +96,8 @@ type LoggerProvider struct {
 	loggersMu sync.Mutex
 	loggers   map[instrumentation.Scope]*logger
 
+	// atomic.Bool 允许快速检查关闭状态；它本身不能把“检查后进入处理器”变成
+	// 一个原子操作。下方互斥锁把准入、活跃计数和关闭决定放在同一临界区内。
 	stopped                   atomic.Bool
 	processorOperationsMu     sync.Mutex
 	processorOperationsActive int
@@ -129,6 +136,8 @@ func NewLoggerProvider(opts ...LoggerProviderOption) *LoggerProvider {
 //
 // This method can be called concurrently.
 func (p *LoggerProvider) Logger(name string, opts ...log.LoggerOption) log.Logger {
+	// 缓存键包含整个 scope，同名但版本、SchemaURL 或属性不同的 Logger
+	// 可以对应不同实例。loggersMu 只保护缓存；它不串行化业务的 Emit 调用。
 	if name == "" {
 		global.Warn("Invalid Logger name.", "name", name)
 	}
@@ -196,6 +205,9 @@ func (p *LoggerProvider) attrValueDepthLimit() int {
 //
 // This method can be called concurrently.
 func (p *LoggerProvider) Shutdown(ctx context.Context) error {
+	// 中文导读：关闭先拒绝新操作，再等待已获准操作完整走完处理器链。
+	// done 的 close 是一次完成通知；接收者无需拿着互斥锁等待，最后退出的
+	// 操作也能获得锁并发出通知。处理器内部调用本方法会等待自己，因而不允许。
 	p.processorOperationsMu.Lock()
 	if p.stopped.Load() {
 		p.processorOperationsMu.Unlock()
@@ -211,6 +223,8 @@ func (p *LoggerProvider) Shutdown(ctx context.Context) error {
 	// All count updates happen while processorOperationsMu is held. Therefore,
 	// either Shutdown observes zero operations and closes the channel above, or
 	// the final operation observes stopped and closes it synchronously.
+	// 等待被取消后，Provider 仍保持 stopped；后续 Shutdown 不会重新执行清理。
+	// 集成时应给首次 Shutdown 留出时间，而不能依赖第二次调用补做关闭。
 	if err := p.waitForProcessorOperations(ctx); err != nil {
 		return err
 	}
@@ -241,6 +255,8 @@ func (p *LoggerProvider) ForceFlush(ctx context.Context) error {
 }
 
 func (p *LoggerProvider) beginProcessorOperation() bool {
+	// 计数覆盖一次完整的 Enabled、Emit 或 ForceFlush 调用，而非单个处理器。
+	// 成功准入后必须配对 end；调用方使用 defer，保证正常返回路径都会归还计数。
 	p.processorOperationsMu.Lock()
 	defer p.processorOperationsMu.Unlock()
 	if p.stopped.Load() {
@@ -282,6 +298,10 @@ func waitForProcessorOperationsCompletion(ctx context.Context, done <-chan struc
 }
 
 // LoggerProviderOption applies a configuration option value to a LoggerProvider.
+//
+// 中文导读：未导出的 apply 限制了外部直接实现此配置接口；With... 返回的
+// 函数包装类型则通过方法集合满足接口。可把每个 With... 理解为一项声明，
+// 创建 Provider 时按传入顺序应用；正常 Emit 路径只读取最终配置。
 type LoggerProviderOption interface {
 	apply(providerConfig) providerConfig
 }

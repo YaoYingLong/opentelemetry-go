@@ -28,6 +28,9 @@ type (
 	// instead of a Set directly. Set has relatively poor performance when used
 	// as a map key compared to Distinct.
 	Set struct {
+		// 中文导读：属性集合为资源、scope、指标维度提供规范化表示。
+		// 切片不能直接用 == 比较，也不能直接作为 map key；这里存储可比较的数组表示，
+		// 另算 hash 加速匹配。业务代码判断集合相等应使用 Equals。
 		hash uint64
 		data any
 	}
@@ -172,6 +175,8 @@ func (l *Set) ToSlice() []KeyValue {
 // attribute set with the same elements as this, where sets are made unique by
 // choosing the last value in the input for any given key.
 func (l *Set) Equivalent() Distinct {
+	// Distinct 是紧凑的 hash 标识，不是可还原属性的编码，也不承诺数学上绝无碰撞。
+	// 适合内部聚合索引；需要比较实际内容时使用下方同时检查 data 的 Equals。
 	if l == nil || l.hash == 0 {
 		return Distinct{hash: emptySet.hash}
 	}
@@ -228,6 +233,10 @@ func NewSetWithSortable(kvs []KeyValue, _ *Sortable) Set {
 // This call includes a Filter to include/exclude attribute keys from the
 // return value. Excluded keys are returned as a slice of attribute values.
 func NewSetWithFiltered(kvs []KeyValue, filter Filter) (Set, []KeyValue) {
+	// 不变量：同一个 key 仅保留输入中的最后一个值，最终按 key 排序。
+	// 稳定排序维持相同 key 的输入次序，后面的逆向扫描才能实现“最后写入者胜出”。
+	// 注意切片参数按值传入时只复制描述符：排序/交换仍会改变调用者的底层数组。
+	// 若调用者需要保留原顺序，应先复制切片，再交给这个构造函数。
 	// Check for empty set.
 	if len(kvs) == 0 {
 		return emptySet, nil
@@ -360,6 +369,9 @@ func (l *Set) Filter(re Filter) (Set, []KeyValue) {
 
 // newSet returns a new set based on the sorted and uniqued kvs.
 func newSet(kvs []KeyValue) Set {
+	// 此时输入已经完成排序和去重。转成定长数组会复制元素，
+	// 避免 Set 继续引用可被调用者修改的输入切片；常见的小集合走固定数组路径，
+	// 更大的集合才用反射构造数组。不能据此把反射搬到每次测量的热路径。
 	s := Set{
 		hash: hashKVs(kvs),
 		data: computeDataFixed(kvs),

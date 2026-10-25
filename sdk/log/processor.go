@@ -23,6 +23,13 @@ import (
 // A [LoggerProvider] stops admitting new operations that invoke Enabled,
 // OnEmit, or ForceFlush when shutdown starts. Callers that use a Processor
 // directly are responsible for coordinating those calls with Shutdown.
+//
+// 中文导读：Processor 是“日志进入 SDK 后如何处理”的扩展点，Exporter 则负责
+// 最终交付。处理器可同步补充或过滤数据，也可 Clone 后交给自己的异步任务。
+// 此接口没有向 Provider 返回“停止整条链”的信号；某处理器忽略记录或返回错误，
+// 都不会阻止后续处理器收到它。过滤要作用于实际导出路径，例如包裹导出处理器。
+// 同一条记录上的串行调用不等于处理器实例无并发：多个业务 goroutine 的 Emit
+// 会交错调用同一个实例；不要把请求状态放进没有保护的共享字段。
 type Processor interface {
 	// DO NOT CHANGE: any modification will not be backwards compatible and
 	// must never be done outside of a new major release.

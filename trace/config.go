@@ -40,6 +40,10 @@ type experimentalOption interface {
 
 // NewTracerConfig applies all the options to a returned TracerConfig.
 func NewTracerConfig(options ...TracerOption) TracerConfig {
+	// 中文导读：Go 的可变参数 options 在函数内是切片，调用者可传零个或多个 With...。
+	// 每个选项把配置转换成下一份配置，作用类似 Java builder 的逐项设置；具体是覆盖还是
+	// 追加由各选项决定，不能一概认为“最后一次调用替换全部配置”。
+	// 配置字段不导出、通过方法读取，使 API 能演进内部表示，同时让 SDK 消费 API 配置。
 	var config TracerConfig
 	for _, option := range options {
 		if _, ok := option.(experimentalOption); ok {
@@ -52,9 +56,13 @@ func NewTracerConfig(options ...TracerOption) TracerConfig {
 
 // TracerOption applies an option to a TracerConfig.
 type TracerOption interface {
+	// 小写方法名属于包内契约：外部包不能仅声明同名 apply 就实现它。
+	// 使用者通过 With... 获得选项，避免直接依赖内部配置细节。
 	apply(TracerConfig) TracerConfig
 }
 
+// 函数在 Go 中也是值；给函数类型定义 apply 方法后，它就满足 TracerOption。
+// With... 可以返回捕获参数的闭包，不必为每个简单选项创建一个新的结构体类型。
 type tracerOptionFunc func(TracerConfig) TracerConfig
 
 func (fn tracerOptionFunc) apply(cfg TracerConfig) TracerConfig {
@@ -108,6 +116,8 @@ func (cfg *SpanConfig) SpanKind() SpanKind {
 // checking or bounding of data), it is left to the SDK to perform this
 // action.
 func NewSpanStartConfig(options ...SpanStartOption) SpanConfig {
+	// API 层负责收集调用意图；属性上限、去重、采样等策略在 SDK 层执行。
+	// 所以理解一次 Start 时，需要把本函数与 sdk/trace/tracer.go 的 newSpan 连起来读。
 	var c SpanConfig
 	for _, option := range options {
 		if _, ok := option.(experimentalOption); ok {
@@ -198,6 +208,8 @@ type EventOption interface {
 
 // SpanOption are options that can be used at both the beginning and end of a span.
 type SpanOption interface {
+	// 接口嵌入是在合并方法集合，不是 Java 类继承。
+	// 同时实现开始/结束两个 apply 方法的选项，才能在两个生命周期位置使用。
 	SpanStartOption
 	SpanEndOption
 }

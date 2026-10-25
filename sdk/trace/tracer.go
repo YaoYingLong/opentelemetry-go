@@ -34,6 +34,10 @@ func (tr *tracer) Start(
 	name string,
 	options ...trace.SpanStartOption,
 ) (context.Context, trace.Span) {
+	// 中文导读：主线从这里进入：生成 Span/采样 -> 放入新 Context -> OnStart -> 返回。
+	// Go 通过显式传递 ctx 传播当前 Span；应把返回的新 Context 继续传给下游调用。
+	// ContextWithSpan 派生新 Context，不会改写调用方传入的 Context，也不会设置线程局部变量。
+	// ctx 取消不阻止记录遥测；取消请求和关闭遥测管线分别由 Context 与 Provider 管理。
 	config := trace.NewSpanStartConfig(options...)
 
 	if ctx == nil {
@@ -63,6 +67,9 @@ func (tr *tracer) Start(
 		tr.inst.SpanStarted(newCtx, psc, s)
 	}
 
+	// s.(ReadWriteSpan) 是带 ok 的类型断言：仅在具体实现具备读写能力时调用处理器。
+	// OnStart 在调用 Start 的 goroutine 中同步执行，传入的仍是原始父 Context。
+	// 处理器可在此补属性，但这些属性产生得比采样决策晚，不能反过来影响本次头部采样。
 	if rw, ok := s.(ReadWriteSpan); ok && s.IsRecording() {
 		sps := tr.provider.getSpanProcessors()
 		for _, sp := range sps {
@@ -85,6 +92,9 @@ type runtimeTracer interface {
 
 // newSpan returns a new configured span.
 func (tr *tracer) newSpan(ctx context.Context, name string, config *trace.SpanConfig) trace.Span {
+	// 中文导读：SpanContext 是传播用的身份数据；Context 则是携带它及其他请求信息的容器。
+	// 零值 SpanContext 没有有效 ID。WithNewRoot 在这里屏蔽原父 Span，让采样器也按根判断。
+	// 这只替换 Context 中的 Span 值，不会删除该 Context 携带的其他信息。
 	// If told explicitly to make this a new root use a zero value SpanContext
 	// as a parent which contains an invalid trace ID and is not remote.
 	var psc trace.SpanContext
@@ -106,6 +116,8 @@ func (tr *tracer) newSpan(ctx context.Context, name string, config *trace.SpanCo
 		sid = tr.provider.idGenerator.NewSpanID(ctx, tid)
 	}
 
+	// 采样器在 Start 时拿到 ID、初始属性和 Links；End 时不会因后来发生错误而重新采样。
+	// 所以需要参与采样的属性应通过 Start 选项提供，而不是 Start 返回后再 SetAttributes。
 	samplingResult := tr.provider.sampler.ShouldSample(SamplingParameters{
 		ParentContext: ctx,
 		TraceID:       tid,
@@ -123,11 +135,14 @@ func (tr *tracer) newSpan(ctx context.Context, name string, config *trace.SpanCo
 	if isSampled(samplingResult) {
 		scc.TraceFlags = psc.TraceFlags() | trace.FlagsSampled
 	} else {
+		// &^ 是 Go 的“按位清除”：仅清除 Sampled 位，保留父上下文的其他标志位。
 		scc.TraceFlags = psc.TraceFlags() &^ trace.FlagsSampled
 	}
 	sc := trace.NewSpanContext(scc)
 
 	if !isRecording(samplingResult) {
+		// Drop 仍返回带有新 SpanID 的 Span，后续子调用或跨服务传播仍能关联这条 Trace。
+		// 它不分配完整记录结构，也不会收到本 SDK 的 OnStart/OnEnd 回调。
 		return tr.newNonRecordingSpan(sc)
 	}
 	return tr.newRecordingSpan(ctx, psc, sc, name, samplingResult, config)
@@ -141,6 +156,8 @@ func (tr *tracer) newRecordingSpan(
 	sr SamplingResult,
 	config *trace.SpanConfig,
 ) *recordingSpan {
+	// 中文导读：RecordOnly 与 RecordAndSample 都进入此分支，是否记录与是否导出是两层判断。
+	// Provider 提供共享配置；这里创建的结构只保存本次操作的数据，并由自己的锁保护。
 	startTime := config.Timestamp()
 	if startTime.IsZero() {
 		startTime = time.Now()
@@ -169,6 +186,8 @@ func (tr *tracer) newRecordingSpan(
 		s.AddLink(l)
 	}
 
+	// 切片后的 ... 将切片展开成可变参数。先写采样器属性，再写 Start 属性，后者同键覆盖。
+	// 统一走 SetAttributes/AddLink，保证构造时的数据也遵守去重与资源限制。
 	s.SetAttributes(sr.Attributes...)
 	s.SetAttributes(config.Attributes()...)
 

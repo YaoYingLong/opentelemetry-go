@@ -10,6 +10,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- Add a Chinese source-reading guide and explanatory comments for `go.opentelemetry.io/otel`,
+  `go.opentelemetry.io/otel/trace`, `go.opentelemetry.io/otel/sdk`, `go.opentelemetry.io/otel/sdk/metric`,
+  `go.opentelemetry.io/otel/sdk/log`, and `go.opentelemetry.io/otel/exporters/otlp/otlptrace`.
 - Add experimental `WithFinish` support for `Float64Counter` Sum aggregation in `go.opentelemetry.io/otel/sdk/metric/x`. (#9186)
 - Add experimental `WithFinish` support for `Int64Counter` Sum aggregation,
   including cancellable provider shutdown and parked waits for in-flight measurements,

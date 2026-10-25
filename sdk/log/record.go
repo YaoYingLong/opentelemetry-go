@@ -40,6 +40,9 @@ var logInvalidAttribute = sync.OnceFunc(func() {
 })
 
 // uniquePool is a pool of unique attributes used for attribute deduplication.
+// 中文导读：sync.Pool 仅复用临时工作区，不能当作可靠保存数据的缓存。
+// 归还前清除引用，避免工作区把日志数据长期留住；过大的切片不进入池，
+// 防止一次异常大的输入抬高后续常驻内存。Record 不持有借出的临时切片。
 var uniquePool = sync.Pool{
 	New: func() any { return new([]attribute.KeyValue) },
 }
@@ -76,6 +79,10 @@ func putIndex(index map[attribute.Key]int) {
 // Do not create instances of Record on your own in production code.
 // You can use [go.opentelemetry.io/otel/sdk/log/logtest.RecordFactory]
 // for testing purposes.
+//
+// 中文导读：这里的 Record 是处理器和导出器使用的 SDK 记录，与桥接 API 的
+// log.Record 是两个类型。它保留属性限制和丢弃计数，并允许处理器覆盖属性；
+// 修改方法没有内部锁，因此一条记录的并发读写需要调用方隔离所有权。
 type Record struct {
 	// Do not embed the log.Record. Attributes need to be overwritable, and
 	// deep-copying needs to be possible.
@@ -94,6 +101,8 @@ type Record struct {
 	// Allocation optimization: an inline array sized to hold
 	// the majority of log calls (based on examination of open-source
 	// code). It holds the start of the list of attributes.
+	// front 数组随结构体赋值复制；back 切片赋值只复制描述信息，仍指向同一
+	// 底层数组。这一区别决定了 Clone 为什么需要额外复制 back。
 	front [attributesInlineCount]attribute.KeyValue
 
 	// The number of attributes in front.
@@ -228,6 +237,9 @@ func (r *Record) WalkAttributes(f func(attribute.KeyValue) bool) {
 // attribute in attrs overwrites any attribute already added to r with the same
 // key. Attributes with invalid keys are ignored.
 func (r *Record) AddAttributes(attrs ...attribute.KeyValue) {
+	// 在默认去重模式下，覆盖已有 key 不消耗新的属性名额；先处理覆盖，再按
+	// 剩余容量接纳新 key。更新属性与新增属性的边界是修改限制逻辑时的重要测试点。
+	// 无效 key 和重复 key 的移除不计入 DroppedAttributes，后者记录额度丢弃。
 	attrs = filterInvalid(attrs)
 	n := r.AttributesLen()
 	if n == 0 {
@@ -510,6 +522,10 @@ func (r *Record) InstrumentationScope() instrumentation.Scope {
 // Clone returns a copy of the record with no shared state. The original record
 // and the clone can both be modified without interfering with each other.
 func (r *Record) Clone() Record {
+	// 中文导读：结构体复制隔离标量和内联数组，slices.Clone 再隔离可写的 back。
+	// attribute.Value 对外提供值语义，Resource 与 Logger 的 scope 在此按只读
+	// 元数据共享，所以不需要逐层复制整个对象图。保证的是通过 Record 方法
+	// 修改互不影响；Clone 本身也不能与原记录的修改并发执行。
 	res := *r
 	res.back = slices.Clone(r.back)
 	return res

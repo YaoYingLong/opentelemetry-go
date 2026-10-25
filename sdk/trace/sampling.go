@@ -13,6 +13,9 @@ import (
 )
 
 // Sampler decides whether a trace should be sampled and exported.
+//
+// 中文导读：采样器属于 Start 热路径，多个 goroutine 可以通过同一 Provider 并发调用它。
+// 自定义实现应快速返回并自行保护共享可变状态；此接口不会替实现加锁或发起后台任务。
 type Sampler interface {
 	// DO NOT CHANGE: any modification will not be backwards compatible and
 	// must never be done outside of a new major release.
@@ -43,6 +46,10 @@ type SamplingParameters struct {
 type SamplingDecision uint8
 
 // Valid sampling decisions.
+//
+// 中文导读：三种决策对应“不记录”“记录但不采样”“记录且采样”。
+// 记录决策决定是否积累数据并进入处理器，Sampled 位决定内置导出处理器是否接收。
+// RecordOnly 可以用于本地统计；它不会被内置 Simple/BatchSpanProcessor 发给 Exporter。
 const (
 	// Drop will not record the span and all attributes/events will be dropped.
 	Drop SamplingDecision = iota
@@ -69,6 +76,9 @@ type traceIDRatioSampler struct {
 }
 
 func (ts traceIDRatioSampler) ShouldSample(p SamplingParameters) SamplingResult {
+	// 中文导读：这里不为每个 Span 再抽一次随机数，而是把 TraceID 的一部分映射到阈值区间。
+	// 相同 TraceID 和相同阈值会得出相同结果；比例含义依赖 TraceID 具备合适的随机性。
+	// 取后 8 字节再右移 1 位得到 63 位数，与构造时 fraction * 2^63 的上界对应。
 	state := trace.SpanContextFromContext(p.ParentContext).TraceState()
 	x := binary.BigEndian.Uint64(p.TraceID[8:16]) >> 1
 	if x < ts.traceIDUpperBound {
@@ -183,6 +193,9 @@ func (s predeterminedSampler) Description() string {
 //   - localParentSampled(Sampler) (default: AlwaysOn)
 //   - localParentNotSampled(Sampler) (default: AlwaysOff)
 func ParentBased(root Sampler, samplers ...ParentBasedSamplerOption) Sampler {
+	// 中文导读：装饰器保存另一个 Sampler，在满足条件时把决策委托给它，不依赖类继承。
+	// root 只处理没有有效父 Span 的情况；默认的四个父分支都跟随父 Span 的 Sampled 位。
+	// 若希望根按比例抽样、子 Span 跟随上游，组合 ParentBased(TraceIDRatioBased(...))。
 	return parentBased{
 		root:   root,
 		config: configureSamplersForParentBased(samplers),
@@ -291,6 +304,8 @@ func (o localParentNotSampledOption) apply(config samplerConfig) samplerConfig {
 }
 
 func (pb parentBased) ShouldSample(p SamplingParameters) SamplingResult {
+	// Remote 表示父身份来自跨进程传播，不表示网络地址或父 SpanKind。
+	// 本地/远端以及采样/未采样共四种路径，允许分别配置；有效父身份不要求本地有记录对象。
 	psc := trace.SpanContextFromContext(p.ParentContext)
 	if psc.IsValid() {
 		if psc.IsRemote() {
@@ -334,6 +349,9 @@ type alwaysRecord struct {
 }
 
 func (ar alwaysRecord) ShouldSample(p SamplingParameters) SamplingResult {
+	// 中文导读：AlwaysRecord 只把 Drop 提升为 RecordOnly，保留“未采样”的传播标志。
+	// 这样处理器能观察更多操作，同时内置导出处理器仍按 Sampled 位过滤。
+	// 当前 Drop 分支构造新的结果并沿用父 TraceState；它不会透传原 Drop 结果的附加属性。
 	rootSamplerSamplingResult := ar.root.ShouldSample(p)
 	if rootSamplerSamplingResult.Decision == Drop {
 		return SamplingResult{

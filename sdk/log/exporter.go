@@ -16,6 +16,11 @@ import (
 var ErrExporterShutdown = errors.New("exporter is shutdown")
 
 // Exporter handles the delivery of log records to external receivers.
+//
+// 中文导读：Export 返回代表本次调用已经完成，SDK 随后可复用传入的切片。
+// 集成导出器不能保存该切片供后台任务继续读取；异步保留时应创建自有切片，
+// 并逐条 Clone，隔离记录的可写存储。重试也应在 Export 内完成，
+// 返回的错误会被视为本次交付的最终失败，处理器不会替导出器重新发送。
 type Exporter interface {
 	// DO NOT CHANGE: any modification will not be backwards compatible and
 	// must never be done outside of a new major release.
@@ -106,6 +111,8 @@ func newChunkExporter(exporter Exporter, size int) Exporter {
 
 // Export exports records in chunks no larger than c.size.
 func (c chunkExporter) Export(ctx context.Context, records []Record) error {
+	// 分块只切分切片视图，不复制记录。某块失败仍尝试后续块，最后聚合错误；
+	// 但父 context 取消会停止继续分块，errors.Join 保留已经发生的错误供 errors.Is 检查。
 	n := len(records)
 	var errs []error
 	for i, j := 0, min(c.size, n); i < n; i, j = i+c.size, min(j+c.size, n) {
@@ -143,6 +150,8 @@ func newTimeoutExporter(exp Exporter, timeout time.Duration) Exporter {
 
 // Export sets a timeout on ctx before calling the Exporter that e wraps.
 func (e *timeoutExporter) Export(ctx context.Context, records []Record) error {
+	// 超时通过 context 协作实现，不会强制终止底层 goroutine。实际导出器必须
+	// 让网络请求和重试等待响应此 context；defer cancel 负责及时释放计时资源。
 	// This only used by the batch processor, and it takes processor timeout config.
 	// Thus, the error message points to the processor. So users know they should adjust the processor timeout.
 	ctx, cancel := context.WithTimeoutCause(ctx, e.timeout, errors.New("processor export timeout"))

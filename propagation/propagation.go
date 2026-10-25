@@ -11,6 +11,9 @@ import (
 // TextMapCarrier is the storage medium used by a TextMapPropagator.
 // See ValuesGetter for how a TextMapCarrier can get multiple values for a key.
 type TextMapCarrier interface {
+	// 中文导读：Carrier 把协议容器适配成统一的字符串读写接口。
+	// HTTP header、消息属性可以有不同存储实现，传播器只关心 Get/Set/Keys。
+	// 这与 Java 的 getter/setter 适配思路相近，但 Go 通过方法集合隐式满足接口。
 	// DO NOT CHANGE: any modification will not be backwards compatible and
 	// must never be done outside of a new major release.
 
@@ -134,6 +137,9 @@ func (p compositeTextMapPropagator) Inject(ctx context.Context, carrier TextMapC
 }
 
 func (p compositeTextMapPropagator) Extract(ctx context.Context, carrier TextMapCarrier) context.Context {
+	// 每个 Extract 都可能返回派生 context，必须把它交给下一个传播器。
+	// 例如 TraceContext 与 Baggage 组合后，最后返回的 context 才同时带有两种信息；
+	// 只调用 Extract 而丢掉返回值，是集成 HTTP/RPC/消息组件时常见的断链原因。
 	for _, i := range p {
 		ctx = i.Extract(ctx, carrier)
 	}

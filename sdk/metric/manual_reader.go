@@ -24,6 +24,10 @@ const (
 
 // ManualReader is a simple Reader that allows an application to
 // read metrics on demand.
+//
+// 中文导读：ManualReader 提供按需采集入口，不创建周期任务，也不自带 Exporter。
+// 调用方决定何时 Collect 及如何使用 ResourceMetrics，因此它也适合测试指标结果。
+// 与 PeriodicReader 一样，它拥有自己的 pipeline 和聚合状态；选择 Manual 不意味着跳过聚合。
 type ManualReader struct {
 	sdkProducer  atomic.Value
 	shutdownOnce sync.Once
@@ -72,6 +76,9 @@ func nextManualReaderID() int64 {
 // register stores the sdkProducer which enables the caller
 // to read metrics from the SDK on demand.
 func (mr *ManualReader) register(p sdkProducer) {
+	// 保存的是绑定 p 的 produce 方法值，后续 Collect 无需知道具体 pipeline 类型。
+	// atomic.Value 内始终存相同的 produceHolder 类型，关闭时也替换为这个类型。
+	// CompareAndSwap 只允许从未注册状态安装生产端，防止同一 Reader 被多个 Provider 复用。
 	// Only register once. If producer is already set, do nothing.
 	if !mr.sdkProducer.CompareAndSwap(nil, produceHolder{produce: p.produce}) {
 		msg := "did not register manual reader"
@@ -100,6 +107,9 @@ func (mr *ManualReader) cardinalityLimit(kind InstrumentKind) (int, bool) {
 //
 // This method is safe to call concurrently.
 func (mr *ManualReader) Shutdown(context.Context) error {
+	// ManualReader 的关闭只封闭后续采集入口并释放外部生产者引用，没有最后一次导出。
+	// 如需保存末次数据，调用方应先 Collect 再关闭；这里的 context 没有被用来等待任何网络操作。
+	// 已经取得旧 produceHolder 的并发 Collect 不会因为替换入口而被强制终止。
 	err := ErrReaderShutdown
 	mr.shutdownOnce.Do(func() {
 		// Any future call to Collect will now return ErrReaderShutdown.
@@ -125,6 +135,10 @@ func (mr *ManualReader) Shutdown(context.Context) error {
 //
 // This method is safe to call concurrently.
 func (mr *ManualReader) Collect(ctx context.Context, rm *metricdata.ResourceMetrics) error {
+	// 中文导读：采集会推进所属聚合器的周期状态，它不是对内部数值的无副作用窥视。
+	// 使用 Delta 时，连续两次 Collect 读取的是各自周期内的数据，第二次不会重复第一次的增量。
+	// 方法允许并发调用，但每个调用仍需自己的输出容器 rm，不能并发写同一个 ResourceMetrics。
+	// SDK 生产端成功后才追加外部 Producer 的数据；外部生产者的错误会合并返回。
 	var err error
 	if mr.inst != nil {
 		cp := mr.inst.CollectMetrics(ctx)

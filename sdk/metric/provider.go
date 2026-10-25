@@ -41,6 +41,13 @@ func defaultMeterFactory(s instrumentation.Scope, p pipelines) metric.Meter {
 // created by a MeterProvider will be associated with the same Resource, have
 // the same Views applied to them, and have their produced metric telemetry
 // passed to the configured Readers.
+//
+// 中文导读：MeterProvider 是指标 SDK 的装配和生命周期入口。
+// Resource 描述被观测的服务实例，Meter 的 Scope 描述产生指标的埋点库；
+// 二者会分别出现在 ResourceMetrics 和 ScopeMetrics 中，不是测量属性。
+// 从这里可以顺着 Meter -> instrument -> aggregate -> Reader 阅读整条链路。
+// 与批量 Span 处理器保存已结束 Span 的方式不同，指标通常在记录时就更新聚合状态，
+// Reader 采集这些状态后才形成数据点；一次 Add 并不对应一次独立的导出记录。
 type MeterProvider struct {
 	embedded.MeterProvider
 
@@ -72,6 +79,10 @@ var _ metric.MeterProvider = (*MeterProvider)(nil)
 // created. This means the returned MeterProvider, one created with no
 // Readers, will perform no operations.
 func NewMeterProvider(options ...Option) *MeterProvider {
+	// 中文导读：Reader 列表在构造时确定，每个 Reader 会注册自己的 pipeline。
+	// 同一批测量可以进入不同 Reader 的聚合器，因此它们能各自选择采集周期和 temporality。
+	// 没有 Reader 时没有这些聚合入口，也就没有可供后续采集的历史测量缓冲。
+	// readerSignals 返回的函数值封装了所有 Reader 的生命周期操作，Provider 只负责调用。
 	conf := newConfig(options)
 	flush, sdown := conf.readerSignals()
 	factory, experimentalShutdown := newExperimentalMeterFactory(conf.experimental)
@@ -155,6 +166,9 @@ func (mp *MeterProvider) Meter(name string, options ...metric.MeterOption) metri
 	}
 
 	c := metric.NewMeterConfig(options...)
+	// Scope 的完整身份参与缓存，而不是只按 name 缓存。
+	// 埋点库通常长期持有 Meter 和 instrument；这里的复用可避免同一身份反复创建状态。
+	// attrs 在作为缓存键前先规范化，Scope 属性与每次 Add/Record 的属性属于不同层次。
 	attrs, _ := attrnorm.SetDedup(c.InstrumentationAttributes())
 	s := instrumentation.Scope{
 		Name:       name,
@@ -233,6 +247,10 @@ func (mp *MeterProvider) ForceFlush(ctx context.Context) error {
 //
 // This method is safe to call concurrently.
 func (mp *MeterProvider) Shutdown(ctx context.Context) error {
+	// 中文导读：stopped 是跨 goroutine 可见的关闭标记，不能用普通 bool 替代。
+	// 它让之后的 Meter 请求返回 noop；实际停止采集和导出由下面的 Reader 关闭函数完成。
+	// 这不等于遍历并清空所有已发给调用方的 instrument，已有对象仍可能被应用持有。
+	// readerSignals 中的 sync.Once 保证 Reader 关闭流程只执行一次，ctx 则约束关闭工作。
 	// Even though it may seem like there is a synchronization issue between the
 	// call to `Store` and checking `shutdown`, the Go concurrency model ensures
 	// that is not the case, as all the atomic operations executed in a program

@@ -72,6 +72,10 @@ func (cfg tracerProviderConfig) MarshalLog() any {
 type TracerProvider struct {
 	embedded.TracerProvider
 
+	// 中文导读：Provider 持有整条 Trace 管线的公共配置，Tracer 按埋点作用域区分。
+	// 同一 Provider 创建的 Tracer 共享采样器、资源和处理器；通常不应为每个请求新建 Provider。
+	// mu 保护 Tracer 缓存及处理器列表的更新；Span 热路径通过原子指针读取列表快照。
+	// atomic.Pointer[T] 是带类型的原子指针，不意味着它指向的任意可变对象都自动线程安全。
 	mu             sync.Mutex
 	namedTracer    map[instrumentation.Scope]*tracer
 	spanProcessors atomic.Pointer[spanProcessorStates]
@@ -103,8 +107,11 @@ type experimentalOption interface {
 //
 // The passed opts are used to override these default values and configure the
 // returned TracerProvider appropriately.
-// 这里一般是入口
+// 这里一般是入口.
 func NewTracerProvider(opts ...TracerProviderOption) *TracerProvider {
+	// 中文导读：构造顺序是默认限制、环境变量、调用方选项，最后为缺省组件补齐默认值。
+	// opts ...T 表示可变参数；每个选项把配置值传入 apply，再接收更新后的配置值。
+	// 这是本包替代 Java Builder 的主要方式，选项按传入顺序生效。
 	o := tracerProviderConfig{
 		spanLimits: NewSpanLimits(),
 	}
@@ -130,6 +137,8 @@ func NewTracerProvider(opts ...TracerProviderOption) *TracerProvider {
 	global.Info("TracerProvider created", "config", o)
 
 	spss := make(spanProcessorStates, 0, len(o.processors))
+	// 切片的长度从 0 开始，容量预留给已知数量的处理器；append 才把元素纳入长度。
+	// 发布后的列表不原地修改，读者可以继续遍历旧列表，而无需占用 Provider 的锁。
 	for _, sp := range o.processors {
 		spss = append(spss, newSpanProcessorState(sp))
 	}
@@ -146,6 +155,8 @@ func NewTracerProvider(opts ...TracerProviderOption) *TracerProvider {
 //
 // This method is safe to be called concurrently.
 func (p *TracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.Tracer {
+	// 中文导读：缓存键是完整 instrumentation.Scope，包括名称、版本、Schema URL 和属性。
+	// 名称标识产生遥测的库或组件，Span 名称则描述一次操作；两者具有不同生命周期。
 	// This check happens before the mutex is acquired to avoid deadlocking if Tracer() is called from within Shutdown().
 	if p.isShutdown.Load() {
 		return noop.NewTracerProvider().Tracer(name, opts...)
@@ -165,6 +176,8 @@ func (p *TracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.T
 		Attributes: attrs,
 	}
 
+	// 立即调用的匿名函数把 defer Unlock 的作用域收窄到缓存查找。
+	// defer 在所在函数返回时执行，因此下方记录日志时已经释放锁。
 	t, ok := func() (trace.Tracer, bool) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
@@ -229,6 +242,8 @@ func (p *TracerProvider) RegisterSpanProcessor(sp SpanProcessor) {
 	}
 
 	current := p.getSpanProcessors()
+	// 复制切片元素再原子替换整个列表，是这里的写时复制策略。
+	// 只复制切片变量会共享底层数组，无法保证正在遍历旧列表的 Start/End 不受干扰。
 	newSPS := make(spanProcessorStates, 0, len(current)+1)
 	newSPS = append(newSPS, current...)
 	newSPS = append(newSPS, newSpanProcessorState(sp))
@@ -267,6 +282,8 @@ func (p *TracerProvider) UnregisterSpanProcessor(sp SpanProcessor) {
 		return
 	}
 	stopOnce.state.Do(func() {
+		// sync.Once 属于处理器的注册状态，使注销与 Provider 关闭共用一次关闭机会。
+		// 此接口没有 ctx 参数，关闭使用 Background；定制处理器仍应避免无限等待。
 		if err := sp.Shutdown(context.Background()); err != nil {
 			otel.Handle(err)
 		}
@@ -283,6 +300,8 @@ func (p *TracerProvider) UnregisterSpanProcessor(sp SpanProcessor) {
 // ForceFlush immediately exports all spans that have not yet been exported for
 // all the registered span processors.
 func (p *TracerProvider) ForceFlush(ctx context.Context) error {
+	// 中文导读：Flush 只要求处理器送出已经结束的 Span，不会替业务代码调用 Span.End。
+	// errors.Join 汇总多个处理器的错误，某个处理器失败后仍可继续尝试后续处理器。
 	spss := p.getSpanProcessors()
 	if len(spss) == 0 {
 		return nil
@@ -305,6 +324,9 @@ func (p *TracerProvider) ForceFlush(ctx context.Context) error {
 // in the order they were registered and any held computational resources are released.
 // After Shutdown is called, all methods are no-ops.
 func (p *TracerProvider) Shutdown(ctx context.Context) error {
+	// 中文导读：应用拥有 Provider 的生命周期，应在退出前给关闭过程留出时间。
+	// CompareAndSwap 只允许一个调用把状态从运行改为关闭；状态先变更，再关闭处理器。
+	// 关闭是单向过程；若 ctx 取消导致提前返回，后续 Shutdown 不会重新执行这一流程。
 	// This check prevents deadlocks in case of recursive shutdown.
 	if p.isShutdown.Load() {
 		return nil
@@ -335,6 +357,8 @@ func (p *TracerProvider) Shutdown(ctx context.Context) error {
 }
 
 func (p *TracerProvider) getSpanProcessors() spanProcessorStates {
+	// Start 和 End 分别读取当时的列表；它们不会为同一个 Span 固定同一组处理器。
+	// 动态注册或注销处理器时，不能假设每次 OnEnd 都一定对应自身收到过的 OnStart。
 	return *p.spanProcessors.Load()
 }
 
@@ -346,6 +370,7 @@ type TracerProviderOption interface {
 type traceProviderOptionFunc func(tracerProviderConfig) tracerProviderConfig
 
 func (fn traceProviderOptionFunc) apply(cfg tracerProviderConfig) tracerProviderConfig {
+	// Go 的具名函数类型也能拥有方法，因此函数值可以满足 TracerProviderOption 接口。
 	return fn(cfg)
 }
 

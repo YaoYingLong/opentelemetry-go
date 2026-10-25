@@ -55,6 +55,9 @@ func newLogger(p *LoggerProvider, scope instrumentation.Scope) *logger {
 }
 
 func (l *logger) Emit(ctx context.Context, r log.Record) {
+	// 中文导读：日志桥把 API 层的 log.Record 交到这里，SDK 再补充资源、scope、
+	// 关联 ID 和属性限制。按值传参不等于递归深拷贝；异步保存记录仍需 Clone。
+	// Emit 没有返回 error，处理器失败会交给全局错误处理器，也不会中止后续处理器。
 	processors := l.provider.processors
 	if len(processors) == 0 {
 		if l.provider.stopped.Load() {
@@ -66,6 +69,8 @@ func (l *logger) Emit(ctx context.Context, r log.Record) {
 		return
 	}
 
+	// 先退出 Provider 的活跃操作计数，再调用应用可替换的错误处理器。
+	// 否则错误处理器若调用 Shutdown，就可能与当前 Emit 互相等待。
 	for _, err := range l.emit(ctx, r, processors) {
 		otel.Handle(err)
 	}
@@ -80,6 +85,8 @@ func (l *logger) emit(ctx context.Context, r log.Record, processors []Processor)
 	l.recordCreated(ctx)
 	newRecord := l.newRecord(ctx, r)
 	var errs []error
+	// 同一次 Emit 内按注册顺序共享一个 *Record；前面的脱敏或补充属性操作
+	// 会被后面的处理器看到。不同 Emit 可并发进入同一处理器，实现者仍需同步。
 	for _, processor := range processors {
 		if err := processor.OnEmit(ctx, &newRecord); err != nil {
 			errs = append(errs, err)
@@ -105,6 +112,9 @@ func (l *logger) recordCreated(ctx context.Context) {
 // processed, true will be returned by default. A value of false will only be
 // returned if it can be positively verified that no Processor will process it.
 func (l *logger) Enabled(ctx context.Context, param log.EnabledParameters) bool {
+	// 中文导读：Enabled 是桥接层构造昂贵日志内容前的预判，多个处理器取逻辑“或”。
+	// Emit 不会先调用它，也不按先前的结果跳过某个处理器；需要过滤的处理器
+	// 必须在 OnEmit 根据完整记录再次判断，不能把 Enabled 当成强制过滤关卡。
 	p := EnabledParameters{
 		InstrumentationScope: l.instrumentationScope,
 		Severity:             param.Severity,
@@ -128,6 +138,10 @@ func (l *logger) Enabled(ctx context.Context, param log.EnabledParameters) bool 
 }
 
 func (l *logger) newRecord(ctx context.Context, r log.Record) Record {
+	// 中文导读：Go 在调用参数中显式传递 context；这里没有隐式读取线程当前 Span。
+	// 只读取 SpanContext 就能关联日志，无需该 Span 正在记录或已被采样。
+	// 因而 traceFlags 的 sampled 位不是日志开关；没有关联上下文时 ID 为零值。
+	// 记录路径不会因请求 context 取消就丢弃日志，导出阶段另有自己的取消边界。
 	sc := trace.SpanContextFromContext(ctx)
 
 	newRecord := Record{
@@ -152,6 +166,8 @@ func (l *logger) newRecord(ctx context.Context, r log.Record) Record {
 	newRecord.SetBody(r.Body())
 
 	// This field SHOULD be set once the event is observed by OpenTelemetry.
+	// Timestamp 保留事件发生时间；ObservedTimestamp 补 SDK 观察到事件的时间，
+	// 这样延迟转发的日志仍能区分“何时发生”与“何时采集”。
 	if newRecord.observedTimestamp.IsZero() {
 		newRecord.observedTimestamp = now()
 	}
@@ -173,6 +189,8 @@ func (l *logger) newRecord(ctx context.Context, r log.Record) Record {
 
 	// Avoid inspecting the error for attributes when the caller has
 	// already supplied the attributes.
+	// exception.message 与 exception.type 分别判断是否需要推导；显式属性优先。
+	// 即使剩余额度容不下推导值，仍要计入被限制丢弃的数量，便于解释字段缺失。
 	if err := r.Err(); err != nil && (!hasExceptionMessage || !hasExceptionType) {
 		// Derive missing exception attributes by default, as required by the
 		// Logs SDK specification. Attribute limits may constrain generation,
@@ -224,6 +242,8 @@ func (l *logger) newRecord(ctx context.Context, r log.Record) Record {
 }
 
 func errorType(err error) string {
+	// 这个局部小接口是 Go 的能力探测：错误类型只要具备 ErrorType 方法就可
+	// 提供稳定类型名，无需依赖 SDK 类型。普通错误再使用反射作后备解析。
 	if et, ok := err.(interface{ ErrorType() string }); ok {
 		if s := et.ErrorType(); s != "" {
 			return s

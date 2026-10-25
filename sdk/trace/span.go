@@ -29,6 +29,9 @@ import (
 // necessary but changing the span isn't necessary or allowed.
 //
 // Warning: methods may be added to this interface in minor releases.
+//
+// 中文导读：这是 SDK 给处理器/导出器的读取视图，API trace.Span 则主要提供写入操作。
+// “只读”是使用约定，不代表返回的 Go 切片具有语言级不可变性；消费者不能修改其内容。
 type ReadOnlySpan interface {
 	// Name returns the name of the span.
 	Name() string
@@ -97,10 +100,12 @@ type ReadWriteSpan interface {
 }
 
 // recordingSpan is an implementation of the OpenTelemetry Span API
-// representing the individual component of a trace that is sampled.
+// representing a span that records data, whether or not it is sampled.
 type recordingSpan struct {
 	embedded.Span
 
+	// 中文导读：这个类型也承载 RecordOnly；拥有记录对象并不等于 Sampled 标志为真。
+	// 指针接收者让多个持有者操作同一个 Span，mu 协调它们对可变数据和结束状态的访问。
 	// mu protects the contents of this span.
 	mu sync.Mutex
 
@@ -164,6 +169,8 @@ type recordingSpan struct {
 }
 
 var (
+	// (*recordingSpan)(nil) 把 nil 转为具体指针类型，让编译器检查方法集合是否满足接口。
+	// 这里无需创建实际 Span；当接口新增要求或实现缺少方法时，会在编译时发现。
 	_ ReadWriteSpan = (*recordingSpan)(nil)
 	_ runtimeTracer = (*recordingSpan)(nil)
 )
@@ -183,6 +190,7 @@ func (s *recordingSpan) SpanContext() trace.SpanContext {
 // IsRecording reports whether this span is being recorded. If this span has ended
 // this will return false.
 func (s *recordingSpan) IsRecording() bool {
+	// Go 可以用 nil 指针调用指针接收者方法，方法内部需在访问字段前自行处理 nil。
 	if s == nil {
 		return false
 	}
@@ -197,6 +205,8 @@ func (s *recordingSpan) IsRecording() bool {
 //
 // This method assumes s.mu.Lock is held by the caller.
 func (s *recordingSpan) isRecording() bool {
+	// 小写版本不重复加锁，供已经持有 mu 的方法使用；sync.Mutex 不是可重入锁。
+	// endTime 的零值充当生命周期标记，结束后即使 Sampled 仍为真，也不再接收新数据。
 	if s == nil {
 		return false
 	}
@@ -208,6 +218,9 @@ func (s *recordingSpan) isRecording() bool {
 // included in the set status when the code is for an error. If this span is
 // not being recorded than this method does nothing.
 func (s *recordingSpan) SetStatus(code codes.Code, description string) {
+	// 中文导读：状态采用 Unset < Error < Ok 的优先级，而不是简单的“最后一次写入获胜”。
+	// 这与 codes 包内的数值顺序一致；一旦明确设置 Ok，后来的 Error 不会覆盖它。
+	// 同级 Error 可以更新描述，非 Error 状态不保存描述。
 	if s == nil {
 		return
 	}
@@ -240,6 +253,9 @@ func (s *recordingSpan) SetStatus(code codes.Code, description string) {
 // attributes the span is configured to have, the last added attributes will
 // be dropped.
 func (s *recordingSpan) SetAttributes(attributes ...attribute.KeyValue) {
+	// 中文导读：限制的是属性键的数量，达到上限后仍允许更新已经存在的键。
+	// 常见的少量写入先追加、读取时再去重，避免每次 SetAttributes 都建立索引。
+	// 但可能超限时立即去重和截断，防止先为大量输入分配内存，再事后丢弃。
 	if s == nil || len(attributes) == 0 {
 		return
 	}
@@ -291,6 +307,9 @@ func (s *recordingSpan) SetAttributes(attributes ...attribute.KeyValue) {
 // ensureAttrsWritable copies shared attributes into a backing array with at
 // least capacity. This method assumes s.mu.Lock is held by the caller.
 func (s *recordingSpan) ensureAttrsWritable(capacity int) {
+	// 切片只是指向底层数组的视图，赋值切片本身不会复制元素。
+	// Attributes 或 snapshot 暴露数组后，下一次写入必须先复制，保证已有读取视图稳定。
+	// 这是写时复制：没有读取者时继续复用数组，有读取者时只在写入边界支付复制成本。
 	if !s.attributesShared {
 		return
 	}
@@ -331,6 +350,8 @@ func (s *recordingSpan) addDroppedAttr(incr int) {
 // This method assumes limit is a value > 0. The argument should be validated
 // by the caller.
 func (s *recordingSpan) addOverCapAttrs(limit int, attrs []attribute.KeyValue) {
+	// 输入中后面的属性可能更新已有键，所以达到上限也不能直接跳出循环。
+	// exists 同时承担去重索引与位置索引，保证最后一次同键写入仍生效。
 	// In order to not allocate more capacity to s.attributes than needed,
 	// prune and truncate this addition of attributes while adding.
 
@@ -401,6 +422,9 @@ func normAttr(attr attribute.KeyValue, depthLimit, lengthLimit int) attribute.Ke
 // on the TracerProvider, an error event is added to the Span before ending it
 // and the panic is continued.
 func (s *recordingSpan) End(options ...trace.SpanEndOption) {
+	// 中文导读：业务通常在 Start 成功后立即 defer span.End()，使函数退出时完成记录。
+	// End 固化结束时间，再把快照同步交给 OnEnd；是否异步导出由处理器决定。
+	// 它不会等待子 Span 结束，也不会取消返回给业务的 Context。
 	// Do not start by checking if the span is being recorded which requires
 	// acquiring a lock. Make a minimal check that the span is not nil.
 	if s == nil {
@@ -420,6 +444,8 @@ func (s *recordingSpan) End(options ...trace.SpanEndOption) {
 
 	config := trace.NewSpanEndConfig(options...)
 	if !s.tracer.provider.panicRecordingDisabled {
+		// recover 只有在合适的 deferred 调用位置才会捕获正在展开的 panic。
+		// 记录异常后用 defer panic 继续传播，遥测不会把业务 panic 吞掉，也不会自动设置 Error 状态。
 		if recovered := recover(); recovered != nil {
 			// Record but don't stop the panic.
 			defer panic(recovered)
@@ -447,6 +473,7 @@ func (s *recordingSpan) End(options ...trace.SpanEndOption) {
 	}
 
 	// Setting endTime to non-zero marks the span as ended and not recording.
+	// 后续写入方法会在同一把锁下检查结束标记；这也是重复 End 不再重复导出的依据。
 	if config.Timestamp().IsZero() {
 		s.endTime = et
 	} else {
@@ -469,6 +496,9 @@ func (s *recordingSpan) End(options ...trace.SpanEndOption) {
 	if len(sps) == 0 {
 		return
 	}
+	// 在释放 Span 锁之后调用外部处理器，避免其读取 Span 或执行其他逻辑时重入同一把锁。
+	// 所有处理器收到同一份快照，应把它及其中的切片视为只读数据。
+	// 此时 Sampled 仍保留在 SpanContext 中，导出处理器不会用已经为 false 的 IsRecording 筛选。
 	snap := s.snapshot()
 	for _, sp := range sps {
 		sp.sp.OnEnd(snap)
@@ -482,6 +512,7 @@ func (s *recordingSpan) End(options ...trace.SpanEndOption) {
 // added back to start gives end as a monotonic time. See
 // https://golang.org/pkg/time/#hdr-Monotonic_Clocks
 func monotonicEndTime(start time.Time) time.Time {
+	// 当 start 带有单调时钟信息时，用相对时长计算终点，可避免系统校时改变 Span 的耗时。
 	return start.Add(time.Since(start))
 }
 
@@ -490,6 +521,9 @@ func monotonicEndTime(start time.Time) time.Time {
 // does not change the Span status. If this span is not being recorded or err is nil
 // than this method does nothing.
 func (s *recordingSpan) RecordError(err error, opts ...trace.EventOption) {
+	// 中文导读：Go 的 error 是接口值，通常作为返回值显式传递，SDK 不会自动感知业务错误。
+	// RecordError 写 exception 事件；若要表示操作失败，还需显式 SetStatus(codes.Error, ...)。
+	// 是否记录堆栈由选项控制，不能把一个 error 值理解为自带完整 Java 异常堆栈的对象。
 	if s == nil || err == nil {
 		return
 	}
@@ -498,6 +532,8 @@ func (s *recordingSpan) RecordError(err error, opts ...trace.EventOption) {
 		return
 	}
 
+	// err.Error() 是调用方实现的代码，放在 Span 锁外执行，允许它重入 Span 而不死锁。
+	// 随后的 AddEvent 会重新检查结束状态，因此格式化期间并发 End 后也不会补写已结束的 Span。
 	opts = append(opts, trace.WithAttributes(
 		semconv.ExceptionType(typeStr(err)),
 		semconv.ExceptionMessage(err.Error()),
@@ -548,6 +584,8 @@ func (s *recordingSpan) AddEvent(name string, o ...trace.EventOption) {
 //
 // This method assumes s.mu.Lock is held by the caller.
 func (s *recordingSpan) addEvent(name string, o ...trace.EventOption) {
+	// Event 自身的属性数量限制与 Span 的属性数量限制分别计数。
+	// 事件队列容量控制事件总数；丢弃计数保留信息损失的痕迹，导出端可据此诊断截断。
 	c := trace.NewEventConfig(o...)
 	attrs, _, _ := attrnorm.KeyValuesDedupLimitDepth(
 		c.Attributes(),
@@ -625,6 +663,8 @@ func (s *recordingSpan) EndTime() time.Time {
 //
 // The order of the returned attributes is not guaranteed to be stable.
 func (s *recordingSpan) Attributes() []attribute.KeyValue {
+	// 这里返回内部数组的只读视图，并标记为已共享；锁只覆盖获取视图，不覆盖调用方遍历。
+	// 安全性来自下一次写入前的复制，因此不能为了少一次分配而跳过 attributesShared 检查。
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dedupeAttrs()
@@ -651,6 +691,8 @@ func (s *recordingSpan) dedupeAttrs() {
 //
 // This method assumes s.mu.Lock is held by the caller.
 func (s *recordingSpan) dedupeAttrsFromRecord(record map[attribute.Key]int) {
+	// [:0] 只把长度归零，仍复用底层数组；unique 的写入位置不会越过已读取的位置。
+	// 最后 clear 尾部元素解除对旧属性的引用，让垃圾回收器能回收不再使用的数据。
 	// Use the fact that slices share the same backing array.
 	unique := s.attributes[:0]
 	for _, a := range s.attributes {
@@ -718,6 +760,8 @@ func (s *recordingSpan) Resource() *resource.Resource {
 }
 
 func (s *recordingSpan) AddLink(link trace.Link) {
+	// Link 表达与其他 Span 的关联，不改变本 Span 的唯一父身份。
+	// Start 后添加的 Link 会进入记录，但无法改变已经完成的采样决策。
 	if s == nil {
 		return
 	}
@@ -792,6 +836,9 @@ func (s *recordingSpan) TracerProvider() trace.TracerProvider {
 
 // snapshot creates a read-only copy of the current state of the span.
 func (s *recordingSpan) snapshot() ReadOnlySpan {
+	// 中文导读：快照在锁内读取一组一致字段，供异步处理器在 Span.End 返回后继续使用。
+	// 标量按值复制；属性共享底层数组并开启写时复制，事件和 Link 则复制队列切片。
+	// 这不是递归深拷贝：Resource 等共享对象仍依赖各自的不可变约定。
 	var sd snapshot
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -859,6 +906,8 @@ func (s *recordingSpan) runtimeTrace(ctx context.Context) context.Context {
 // that wraps a SpanContext. It performs no operations other than to return
 // the wrapped SpanContext or TracerProvider that created it.
 type nonRecordingSpan struct {
+	// 中文导读：未记录的 Span 仍保存身份与所属 Provider，保证上下文传播和后续建 Span 可用。
+	// 它用值接收者实现空操作，不携带属性/事件队列，也不需要记录对象的互斥锁。
 	embedded.Span
 
 	// tracer is the SDK tracer that created this span.

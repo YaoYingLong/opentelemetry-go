@@ -15,6 +15,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// 中文导读：这里保存的是 API 接口，不直接依赖 SDK 的具体实现。
+// atomic.Value 要求历次 Store 的动态类型一致；包装成固定的 holder 后，内部接口可以
+// 从默认实现切换到 SDK 实现，而原子容器始终存放同一种 holder 类型。
+// Load/Store 解决跨 goroutine 发布与读取的问题，不代表 Provider 内部的可变状态无需同步。
 type (
 	tracerProviderHolder struct {
 		tp trace.TracerProvider
@@ -75,6 +79,8 @@ func TracerProvider() trace.TracerProvider {
 
 // SetTracerProvider is the internal implementation for global.SetTracerProvider.
 func SetTracerProvider(tp trace.TracerProvider) {
+	// 初始全局 Provider 是可委托的占位对象：埋点库可以先取得 Tracer，
+	// 应用稍后再安装 SDK。这一层解耦了库的初始化顺序与应用的遥测配置顺序。
 	current := TracerProvider()
 
 	if _, cOk := current.(*tracerProvider); cOk {
@@ -89,6 +95,8 @@ func SetTracerProvider(tp trace.TracerProvider) {
 		}
 	}
 
+	// Once 只把“最初那批占位对象”连接一次。后续再次 Set 会替换全局入口，
+	// 但不能把所有已拿到的旧 Tracer 自动迁移到新 Provider，也不会补录初始化前的 span。
 	delegateTraceOnce.Do(func() {
 		if def, ok := current.(*tracerProvider); ok {
 			def.setDelegate(tp)

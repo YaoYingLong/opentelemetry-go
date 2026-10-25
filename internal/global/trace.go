@@ -38,6 +38,8 @@ import (
 // All TracerProvider functionality is forwarded to a delegate once
 // configured.
 type tracerProvider struct {
+	// 中文导读：嵌入 embedded.TracerProvider 是 API 演进的编译期约束，
+	// 不会自动提供 SDK 的业务实现。真正的 Tracer 方法仍由这个结构体实现。
 	embedded.TracerProvider
 
 	mtx      sync.Mutex
@@ -57,6 +59,8 @@ var _ trace.TracerProvider = &tracerProvider{}
 //
 // It is guaranteed by the caller that this happens only once.
 func (p *tracerProvider) setDelegate(provider trace.TracerProvider) {
+	// 这里与 Tracer 共用互斥锁，确保安装 SDK 与创建占位 Tracer 不能交错漏接。
+	// defer 在函数退出时释放锁，包含提前 return 的路径；它不是启动异步任务。
 	p.mtx.Lock()
 	defer p.mtx.Unlock()
 
@@ -70,6 +74,8 @@ func (p *tracerProvider) setDelegate(provider trace.TracerProvider) {
 		t.setDelegate(provider)
 	}
 
+	// 已返回的 *tracer 仍由调用者持有，并已获得 delegate；清空缓存只是释放登记表。
+	// 后续 Tracer 调用走 provider，不再需要这张占位对象表。
 	p.tracers = nil
 }
 
@@ -85,6 +91,8 @@ func (p *tracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.T
 	// At this moment it is guaranteed that no sdk is installed, save the tracer in the tracers map.
 
 	c := trace.NewTracerConfig(opts...)
+	// 一个埋点库的身份包含名称、版本、schema 与 scope 属性。
+	// 缓存的是可复用的 Tracer，而不是一次请求的 Span；不要用请求 ID 动态命名 Tracer。
 	key := il{
 		name:    name,
 		version: c.InstrumentationVersion(),
@@ -142,6 +150,9 @@ func (t *tracer) setDelegate(provider trace.TracerProvider) {
 // Start implements trace.Tracer by forwarding the call to t.delegate if
 // set, otherwise it forwards the call to a NoopTracer.
 func (t *tracer) Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+	// Start 位于每次请求都会经过的路径。安装 SDK 时写入一次 delegate，
+	// 此后通过原子读取转发，避免为了检查全局配置而每次获取 Provider 的互斥锁。
+	// 接口类型断言只取出先前存入的实现；真正的 ID、采样与 processor 在 SDK tracer 中处理。
 	delegate := t.delegate.Load()
 	if delegate != nil {
 		return delegate.(trace.Tracer).Start(ctx, name, opts...)
@@ -182,6 +193,9 @@ func (t *tracer) newSpan(
 		return tracer.Start(ctx, name, opts...)
 	}
 
+	// 未接入普通 SDK 且未启用上方自动埋点分支时，保留传入的 SpanContext。
+	// 这里不会为本次操作生成新的 ID：既不采集本地数据，也尽量保住已有链路的传播能力。
+	// 注意已有 no-op span 不会在 SDK 安装后“升级”；只有之后的 Start 才会使用 delegate。
 	s := nonRecordingSpan{sc: trace.SpanContextFromContext(ctx), tracer: t}
 	ctx = trace.ContextWithSpan(ctx, s)
 	return ctx, s

@@ -38,6 +38,10 @@ var (
 
 // Inject injects the trace context from ctx into carrier.
 func (TraceContext) Inject(ctx context.Context, carrier TextMapCarrier) {
+	// 中文导读：进程内通过 context 传对象，跨进程只能传可序列化的标识。
+	// Inject 读取当前 span 的 SpanContext 写入载体，不会导出 span 的属性、事件或时间。
+	// 客户端集成通常先 Start 出站 span，再用 Start 返回的 context 注入请求头，
+	// 这样下游看到的 parent ID 才是这个出站 span 的 ID。
 	sc := trace.SpanContextFromContext(ctx)
 	if !sc.IsValid() {
 		return
@@ -48,6 +52,8 @@ func (TraceContext) Inject(ctx context.Context, carrier TextMapCarrier) {
 	}
 
 	// Preserve only the spec-defined flags: sampled (0x01) and random (0x02).
+	// 当前 checkout 同时支持 sampled 与 random 标志；这里的位与是在保留已支持的位，
+	// 不是“只传采样位”。阅读 flags 时应以本版本的常量和测试为准。
 	flags := sc.TraceFlags() & (trace.FlagsSampled | trace.FlagsRandom)
 
 	var sb strings.Builder
@@ -71,6 +77,8 @@ func (TraceContext) Inject(ctx context.Context, carrier TextMapCarrier) {
 // tracecontext as the remote SpanContext. If the extracted tracecontext is
 // invalid, the passed ctx will be returned directly instead.
 func (tc TraceContext) Extract(ctx context.Context, carrier TextMapCarrier) context.Context {
+	// 接收方先解析远端父上下文，再用返回值 Start 服务端/消费者 span。
+	// 无效的外部 header 被忽略，保留调用者原有 context；遥测输入不应破坏正常业务处理。
 	sc := tc.extract(carrier)
 	if !sc.IsValid() {
 		return ctx
@@ -116,6 +124,8 @@ func (TraceContext) extract(carrier TextMapCarrier) trace.SpanContext {
 	// Ignore the error returned here. Failure to parse tracestate MUST NOT
 	// affect the parsing of traceparent according to the W3C tracecontext
 	// specification.
+	// traceparent 决定链路身份，tracestate 是附加的供应商状态。
+	// 附加状态解析失败不应连带丢失有效父链路，因此这里有意忽略这一处错误。
 	scc.TraceState, _ = trace.ParseTraceState(carrier.Get(tracestateHeader))
 	scc.Remote = true
 
@@ -128,6 +138,9 @@ func (TraceContext) extract(carrier TextMapCarrier) trace.SpanContext {
 }
 
 func extractPart(dst []byte, h *string, n int) bool {
+	// *string 让函数能更新调用者的“剩余输入”；dst 切片则指向调用者提供的字节缓冲区。
+	// 先验证固定长度，再两字符一组解码，避免在不可信输入上越界。
+	// 返回 bool 表示整个片段是否有效；即使缓冲区写了一部分，失败结果也不会成为父上下文。
 	part, left, _ := strings.Cut(*h, delimiter)
 	*h = left
 	if len(part) != n {
